@@ -9,7 +9,7 @@ from spotipy.oauth2 import SpotifyOAuth
 # ==================== CONFIG ====================
 CONFIG_PATH = Path(__file__).resolve().parent / "spotify_keys.json"
 if not CONFIG_PATH.exists():
-    sys.exit(f"❌ Fichier {CONFIG_PATH} introuvable")
+    sys.exit(f"Fichier {CONFIG_PATH} introuvable")
 
 cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
 
@@ -31,7 +31,7 @@ for driver in ["fbcon", "directfb", "kmsdrm", "x11"]:
     try:
         os.environ["SDL_VIDEODRIVER"] = driver
         pygame.display.init()
-        print(f"✅ Driver SDL utilisé : {driver}")
+        print(f"Driver SDL utilisé : {driver}")
         break
     except pygame.error:
         print(f"Driver SDL non disponible : {driver}")
@@ -102,7 +102,7 @@ async def fetch_art(url, session):
         print("Erreur chargement art:", e)
 
 async def spotify_loop(session):
-    print("🎵 Thread Spotify async démarré")
+    print("Thread Spotify async démarré")
     last_track = None
     while True:
         try:
@@ -127,7 +127,7 @@ async def spotify_loop(session):
 
 # ==================== METRICS ====================
 async def metrics_loop(session):
-    print("📈 Thread Metrics async démarré")
+    print("Thread Metrics async démarré")
     while True:
         try:
             async with session.get(f"{PC_HELPER_BASE}/metrics", timeout=2) as r:
@@ -145,18 +145,20 @@ encoder = RotaryEncoder(a=ENC_A, b=ENC_B, max_steps=0)
 encoder_button = Button(ENC_SW, pull_up=True, bounce_time=0.2)
 buttons = {pin: Button(pin, pull_up=True, bounce_time=0.2) for pin in BTN_PINS}
 
+loop = asyncio.get_event_loop()
+
 def media_cmd(cmd):
     try:
-        asyncio.create_task(_post_media(cmd))
-    except RuntimeError:
-        pass  # ignore si event loop non prête
+        asyncio.run_coroutine_threadsafe(_post_media(cmd), loop)
+    except Exception as e:
+        print("GPIO media_cmd erreur:", e)
 
 async def _post_media(cmd):
-    async with aiohttp.ClientSession() as s:
-        try:
+    try:
+        async with aiohttp.ClientSession() as s:
             await s.post(f"{PC_HELPER_BASE}/media", json={"cmd": cmd}, timeout=0.5)
-        except:
-            pass
+    except Exception as e:
+        print("Erreur _post_media:", e)
 
 def on_rotate():
     delta = encoder.steps
@@ -175,7 +177,7 @@ def on_button(pin):
     elif name == "B2_PLAY": media_cmd("playpause")
     elif name == "B3_NEXT": media_cmd("next")
     elif name == "B4_MODE":
-        asyncio.create_task(toggle_mode())
+        asyncio.run_coroutine_threadsafe(toggle_mode(), loop)
 
 async def toggle_mode():
     async with state_lock:
@@ -196,7 +198,7 @@ def blit_rotated():
         screen.blit(frame, (0, 0))
 
 async def render_loop():
-    print("🖥️  Thread graphique async démarré")
+    print("Thread graphique async démarré")
     while True:
         for e in pygame.event.get():
             if e.type == pygame.QUIT:
@@ -244,6 +246,7 @@ def render_stats(st, color):
         y += 60
 
 # ==================== MAIN ====================
+loop = asyncio.get_event_loop()
 async def main():
     async with aiohttp.ClientSession() as session:
         tasks = [
