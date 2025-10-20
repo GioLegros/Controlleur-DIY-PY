@@ -134,6 +134,7 @@ progress_ms = 0
 duration_ms = 1
 playing = False
 text_color = (255, 255, 255)
+
 # ---------- Helpers ----------
 def http_post(path, payload):
     try:
