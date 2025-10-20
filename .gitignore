@@ -1,0 +1,23 @@
+# Secrets et jetons
+spotify_keys.json
+.cache
+
+# Fichiers binaires
+*.o
+*.out
+*.bin
+*.exe
+*.log
+ui_panel
+
+# Environnements Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+ENV/
+
+# Fichiers système
+.DS_Store
+Thumbs.db
