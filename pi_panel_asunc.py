@@ -7,7 +7,7 @@ from spotipy import Spotify
 from spotipy.oauth2 import SpotifyOAuth
 
 # ==================== CONFIG ====================
-CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
+CONFIG_PATH = Path(__file__).resolve().parent / "spotify_keys.json"
 if not CONFIG_PATH.exists():
     sys.exit(f"❌ Fichier {CONFIG_PATH} introuvable")
 
