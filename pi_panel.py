@@ -1,56 +1,63 @@
 #!/usr/bin/env python3
-import os, io, time, threading, requests, sys, json
+import os
+import io
+import time
+import threading
+import requests
+import sys
+import json
 import pygame
 from pathlib import Path
 from PIL import Image
-from gpiozero import RotaryEncoder, Button
-from spotipy import Spotify
-from spotipy.oauth2 import SpotifyOAuth
 
-# ------------ LIRE LA CONFIG ------------
-# Le fichier config.json doit se trouver dans le même dossier que ce script.
+# ================== CONFIG FICHIER ==================
 CONFIG_PATH = Path(__file__).resolve().parent / "spotify_keys.json"
 
 def load_config(path):
     if not path.exists():
-        sys.exit(f"[ERROR] Fichier de configuration introuvable : {path}\nCrée un fichier 'config.json' dans le même dossier (voir exemple).")
+        sys.exit(f"[ERROR] Fichier de configuration introuvable : {path}")
     try:
         with open(path, "r", encoding="utf-8") as f:
             cfg = json.load(f)
     except Exception as e:
         sys.exit(f"[ERROR] Impossible de lire {path}: {e}")
-    # valeurs attendues
     required = ["SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "SPOTIFY_REDIRECT_URI"]
     for k in required:
         if k not in cfg or not cfg[k]:
             sys.exit(f"[ERROR] Clé de configuration manquante: {k} dans {path}")
-    # scope optionnel — si non présent on prend la valeur par défaut
     if "SPOTIFY_SCOPE" not in cfg:
         cfg["SPOTIFY_SCOPE"] = "user-read-playback-state user-modify-playback-state user-read-currently-playing"
-    # PC_HELPER_BASE optionnel
     if "PC_HELPER_BASE" not in cfg:
         cfg["PC_HELPER_BASE"] = "http://192.168.0.102:5005"
     return cfg
 
 cfg = load_config(CONFIG_PATH)
-
-# ------------ CONFIG ------------
 PC_HELPER_BASE = cfg["PC_HELPER_BASE"]
+
+# Spotify (Spotipy)
+from spotipy import Spotify
+from spotipy.oauth2 import SpotifyOAuth
 SPOTIFY_CLIENT_ID     = cfg["SPOTIFY_CLIENT_ID"]
 SPOTIFY_CLIENT_SECRET = cfg["SPOTIFY_CLIENT_SECRET"]
 SPOTIFY_REDIRECT_URI  = cfg["SPOTIFY_REDIRECT_URI"]
-SPOTIFY_SCOPE = cfg["SPOTIFY_SCOPE"]
+SPOTIFY_SCOPE         = cfg["SPOTIFY_SCOPE"]
 
-# GPIO PINS
+# ================== HARDWARE / UI ==================
 BTN_PINS = {17:"B1_PREV", 27:"B2_PLAY", 22:"B3_NEXT", 5:"B4_MODE"}
 ENC_A, ENC_B, ENC_SW = 6, 13, 19
 
-# UI CONFIG
 W, H = 480, 800
 FPS = 12
-ICONS_PATH = "/home/giovanni/Code/Controller DIY/icons"
+ICONS_PATH = str(Path(__file__).resolve().parent / "icons")
+ROTATE_SCREEN = True
 
-# Configuration affichage Pygame selon le driver dispo
+HTTP_TIMEOUT_S = 0.6
+ART_TIMEOUT_S  = 1.2
+SPOTIFY_POLL_S = 2.0
+METRICS_POLL_S = 5.0
+RESYNC_PROGRESS_S = 5.0
+
+# ================== ENV SDL / Pygame ==================
 os.environ["SDL_FBDEV"] = "/dev/fb0"
 os.environ["SDL_MOUSEDRV"] = "TSLIB"
 os.environ["SDL_MOUSEDEV"] = "/dev/input/touchscreen"
@@ -58,62 +65,75 @@ os.environ["SDL_MOUSEDEV"] = "/dev/input/touchscreen"
 for driver in ["fbcon", "directfb", "kmsdrm", "x11"]:
     try:
         os.environ["SDL_VIDEODRIVER"] = driver
-        import pygame
-        pygame.display.init()
+        import pygame as _pg_test
+        _pg_test.display.init()
         print(f"Driver SDL utilisé : {driver}")
         break
-    except pygame.error:
-        print(f"river SDL non disponible : {driver}")
+    except Exception:
+        print(f"Driver SDL non disponible : {driver}")
 else:
     sys.exit("Aucun driver vidéo compatible trouvé. Essaie avec 'startx'.")
 
-# --------------------------------
 pygame.init()
 screen = pygame.display.set_mode((W, H), pygame.FULLSCREEN)
-ROTATE_SCREEN = True  # active ou désactive la rotation
-
-# ICONS
-prev_icon  = pygame.image.load(os.path.join(ICONS_PATH, "prev.png")).convert_alpha()
-next_icon  = pygame.image.load(os.path.join(ICONS_PATH, "next.png")).convert_alpha()
-play_icon  = pygame.image.load(os.path.join(ICONS_PATH, "play.png")).convert_alpha()
-pause_icon = pygame.image.load(os.path.join(ICONS_PATH, "pause.png")).convert_alpha()
-mode_icon = pygame.image.load(os.path.join(ICONS_PATH, "mode.png")).convert_alpha()
-
-frame = pygame.Surface((W, H))
-
-def blit_rotated():
-    """Dessine la surface 'frame' sur l'écran en la tournant si nécessaire"""
-    if ROTATE_SCREEN:
-        rotated = pygame.transform.rotate(frame, 90)  # rotation sens horaire
-        rect = rotated.get_rect(center=screen.get_rect().center)
-        screen.blit(rotated, rect.topleft)
-    else:
-        screen.blit(frame, (0, 0))
-
-
 pygame.mouse.set_visible(False)
 pygame.display.set_caption("PiPanel")
 
-# Affichage initial avant chargement Spotify
-screen.fill((18, 18, 18))
-pygame.display.flip()
+# Fonts
+try:
+    FONT  = pygame.font.SysFont("Inter", 26)
+    BIG   = pygame.font.SysFont("Inter", 34, bold=True)
+    SMALL = pygame.font.SysFont("Inter", 22)
+except Exception:
+    FONT  = pygame.font.Font(None, 26)
+    BIG   = pygame.font.Font(None, 34)
+    SMALL = pygame.font.Font(None, 22)
 
-FONT = pygame.font.SysFont("Inter", 26)
-BIG  = pygame.font.SysFont("Inter", 34, bold=True)
-SMALL = pygame.font.SysFont("Inter", 22)
+frame = pygame.Surface((W, H))
+clock = pygame.time.Clock()
 
-text = BIG.render("Connexion à Spotify...", True, (200, 200, 200))
-screen.blit(text, (W//2 - text.get_width()//2, H//2 - text.get_height()//2))
-pygame.display.flip()
+# ================== ICONES ==================
+def load_icon(name, fallback_size=(48,48)):
+    path = os.path.join(ICONS_PATH, name)
+    try:
+        img = pygame.image.load(path).convert_alpha()
+        return img
+    except Exception:
+        s = pygame.Surface(fallback_size, pygame.SRCALPHA)
+        pygame.draw.rect(s, (100,100,100,255), s.get_rect(), border_radius=6)
+        return s
 
-# ---------- GPIO SETUP ----------
-encoder = RotaryEncoder(a=ENC_A, b=ENC_B, max_steps=0)
-encoder_button = Button(ENC_SW, pull_up=True, bounce_time=0.2)
-buttons = {pin: Button(pin, pull_up=True, bounce_time=0.2) for pin in BTN_PINS}
+prev_icon  = load_icon("prev.png")
+next_icon  = load_icon("next.png")
+play_icon  = load_icon("play.png")
+pause_icon = load_icon("pause.png")
+mode_icon  = load_icon("mode.png")
 
-# ---------- Spotify setup ----------
+# ================== ETAT PARTAGE ==================
+state_lock = threading.Lock()
+state = {
+    "mode": "SPOTIFY",
+    "now_title": "—",
+    "now_artist": "—",
+    "progress_ms": 0,
+    "duration_ms": 1,
+    "playing": False,
+    "track_id": None,
+    "art_surface": None,
+    "bg_surface": None,
+    "text_color": (255,255,255),
+    "metrics": {}
+}
+
+# ================== COMMANDES PC ==================
+def media_cmd(cmd):
+    try:
+        requests.post(f"{PC_HELPER_BASE}/media", json={"cmd": cmd}, timeout=HTTP_TIMEOUT_S)
+    except Exception:
+        pass
+
+# ================== SPOTIFY ==================
 CACHE_DIR = Path(__file__).resolve().parent
-
 sp = Spotify(auth_manager=SpotifyOAuth(
     client_id=SPOTIFY_CLIENT_ID,
     client_secret=SPOTIFY_CLIENT_SECRET,
@@ -123,279 +143,279 @@ sp = Spotify(auth_manager=SpotifyOAuth(
     cache_path=str(CACHE_DIR / ".cache")
 ))
 
-
-# ---------- State ----------
-mode = "SPOTIFY"
-art_surface = None
-bg_surface = None
-now_title = "—"
-now_artist = "—"
-progress_ms = 0
-duration_ms = 1
-playing = False
-text_color = (255, 255, 255)
-
-# ---------- Helpers ----------
-def http_post(path, payload):
+def fetch_and_apply_artwork(url):
     try:
-        requests.post(f"{PC_HELPER_BASE}{path}", json=payload, timeout=0.3)
-    except:
+        data = requests.get(url, timeout=ART_TIMEOUT_S).content
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+        img = img.resize((300,300), Image.LANCZOS)
+        surf = pygame.image.fromstring(img.tobytes(), img.size, img.mode)
+        avg_color = img.resize((1,1)).getpixel((0,0))
+        small_h = 200
+        surf_bg = pygame.Surface((W, small_h))
+        for y in range(small_h):
+            ratio = y / float(small_h)
+            r = int(avg_color[0] * (1 - ratio))
+            g = int(avg_color[1] * (1 - ratio))
+            b = int(avg_color[2] * (1 - ratio))
+            pygame.draw.line(surf_bg, (r,g,b), (0,y), (W,y))
+        surf_bg = pygame.transform.smoothscale(surf_bg, (W,H))
+        luminance = 0.299*avg_color[0] + 0.587*avg_color[1] + 0.114*avg_color[2]
+        tcolor = (255,255,255) if luminance < 128 else (20,20,20)
+        with state_lock:
+            state["art_surface"] = surf
+            state["bg_surface"] = surf_bg
+            state["text_color"] = tcolor
+    except Exception:
+        with state_lock:
+            state["art_surface"] = None
+            bg = pygame.Surface((W,H)); bg.fill((20,20,20))
+            state["bg_surface"] = bg
+            state["text_color"] = (255,255,255)
+
+# ================== METRICS ==================
+def poll_metrics():
+    try:
+        r = requests.get(f"{PC_HELPER_BASE}/metrics", timeout=HTTP_TIMEOUT_S)
+        data = r.json() if r.status_code == 200 else {}
+        with state_lock:
+            state["metrics"] = data
+    except Exception:
         pass
 
-def media_cmd(cmd):
-    http_post("/media", {"cmd": cmd})
+# ================== GPIO LOOP ==================
+try:
+    import RPi.GPIO as GPIO
+except Exception as e:
+    sys.exit(f"[ERROR] RPi.GPIO introuvable: {e}")
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setwarnings(False)
+
+for pin in BTN_PINS.keys():
+    GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+GPIO.setup(ENC_A, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+GPIO.setup(ENC_B, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+GPIO.setup(ENC_SW, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+def gpio_loop():
+    last_btn = {pin: GPIO.input(pin) for pin in BTN_PINS}
+    last_sw  = GPIO.input(ENC_SW)
+    last_A   = GPIO.input(ENC_A)
+    debounce_ms = 40
+    last_time_btn = {pin: 0 for pin in BTN_PINS}
+    last_time_sw  = 0
+
+    while True:
+        now_ms = int(time.time() * 1000)
+        for pin, name in BTN_PINS.items():
+            val = GPIO.input(pin)
+            if val != last_btn[pin]:
+                last_btn[pin] = val
+                if val == 0 and (now_ms - last_time_btn[pin] > debounce_ms):
+                    last_time_btn[pin] = now_ms
+                    if name == "B1_PREV":
+                        media_cmd("prev")
+                    elif name == "B2_PLAY":
+                        media_cmd("playpause")
+                    elif name == "B3_NEXT":
+                        media_cmd("next")
+                    elif name == "B4_MODE":
+                        with state_lock:
+                            state["mode"] = "STATS" if state["mode"] == "SPOTIFY" else "SPOTIFY"
+
+        sw = GPIO.input(ENC_SW)
+        if sw != last_sw:
+            last_sw = sw
+            if sw == 0 and (now_ms - last_time_sw > debounce_ms):
+                last_time_sw = now_ms
+                media_cmd("playpause")
+
+        A = GPIO.input(ENC_A)
+        if A != last_A:
+            last_A = A
+            if A == 1:
+                B = GPIO.input(ENC_B)
+                if B == 0:
+                    media_cmd("vol_up")
+                else:
+                    media_cmd("vol_down")
+        time.sleep(0.0015)
+
+# ================== RENDER HELPERS ==================
+def blit_rotated():
+    if ROTATE_SCREEN:
+        rotated = pygame.transform.rotate(frame, 90)
+        rect = rotated.get_rect(center=screen.get_rect().center)
+        screen.blit(rotated, rect.topleft)
+    else:
+        screen.blit(frame, (0, 0))
+
+def draw_progress_bar(surface, x, y, w, h, ratio):
+    base_color = (25, 25, 25)
+    fill_color = (30, 215, 96)
+    pygame.draw.rect(surface, base_color, (x, y, w, h), border_radius=6)
+    pygame.draw.rect(surface, fill_color, (x, y, int(w*ratio), h), border_radius=6)
 
 def ms_str(ms):
-    s = int(ms/1000)
-    return f"{s//60}:{s%60:02d}"
-
-# ---------- Spotify & visuals ----------
-def create_gradient_bg(color):
-    small_h = 200  # réduit
-    surf = pygame.Surface((W, small_h))
-    for y in range(small_h):
-        ratio = y / small_h
-        r = int(color[0] * (1 - ratio))
-        g = int(color[1] * (1 - ratio))
-        b = int(color[2] * (1 - ratio))
-        pygame.draw.line(surf, (r,g,b), (0,y), (W,y))
-    return pygame.transform.smoothscale(surf, (W, H))
-
-
-def fetch_art(url):
-    global art_surface, bg_surface, text_color
     try:
-        img_data = requests.get(url, timeout=2).content
-        img = Image.open(io.BytesIO(img_data)).convert("RGB")
-        img = img.resize((300, 300), Image.LANCZOS)
-        art_surface = pygame.image.fromstring(img.tobytes(), img.size, img.mode)
-
-        # --- extraire la couleur dominante ---
-        tmp_path = "/tmp/art.jpg"
-        with open(tmp_path, "wb") as f:
-            f.write(img_data)
-        avg_color = img.resize((1,1)).getpixel((0,0))
-        bg_surface = create_gradient_bg(avg_color)
-
-        # --- choisir couleur du texte selon la luminosité du fond ---
-        def is_dark_color(c):
-            r, g, b = c
-            luminance = 0.299*r + 0.587*g + 0.114*b
-            return luminance < 128
-
-        if is_dark_color(avg_color):
-            text_color = (255, 255, 255)  # texte clair sur fond sombre
-        else:
-            text_color = (20, 20, 20)     # texte foncé sur fond clair
-
+        s = int(ms/1000)
+        return f"{s//60}:{s%60:02d}"
     except Exception:
-        art_surface = None
-        bg_surface = pygame.Surface((W, H))
-        bg_surface.fill((20, 20, 20))
-        text_color = (255, 255, 255)
+        return "0:00"
 
+def render_spotify(surface):
+    with state_lock:
+        art = state["art_surface"]
+        bg = state["bg_surface"]
+        tcolor = state["text_color"]
+        title = state["now_title"]
+        artist = state["now_artist"]
+        progress_ms = state["progress_ms"]
+        duration_ms = state["duration_ms"]
+        playing = state["playing"]
 
-
-def spotify_loop():
-    global now_title, now_artist, progress_ms, duration_ms, playing
-    last_track_id = None
-    print("Thread Spotify démarré...")
-    while True:
-        try:
-            cur = sp.current_playback() or {}
-            item = cur.get("item") or {}
-            now_title = item.get("name","—")
-            now_artist = ", ".join([a["name"] for a in item.get("artists",[])]) if item else "—"
-            duration_ms = (item.get("duration_ms") or 1)
-            progress_ms = cur.get("progress_ms", 0)
-            playing = cur.get("is_playing", False)
-            track_id = item.get("id")
-            if track_id and track_id != last_track_id:
-                images = (item.get("album",{}).get("images") or [])
-                if images:
-                    threading.Thread(target=fetch_art, args=(images[0]["url"],), daemon=True).start()
-                last_track_id = track_id
-        except Exception:
-            pass
-        time.sleep(2)
-
-threading.Thread(target=spotify_loop, daemon=True).start()
-
-# ---------- Rendering ----------
-def draw_progress_bar(x, y, w, h, ratio):
-    base_color = (25, 25, 25)
-    fill_color = (30, 215, 96)  # vert Spotify
-    pygame.draw.rect(frame, base_color, (x, y, w, h), border_radius=6)
-    pygame.draw.rect(frame, fill_color, (x, y, int(w * ratio), h), border_radius=6)
-
-
-def render_spotify():
-    global last_bg_surface, fade_start, fade_from, fade_to
-
-    # Gestion du changement de fond (transition douce)
-    if bg_surface != last_bg_surface:
-        fade_start = pygame.time.get_ticks()
-        fade_from = last_bg_surface
-        fade_to = bg_surface
-        last_bg_surface = bg_surface
-
-    # Calcul du fondu
-    if fade_from and fade_to:
-        elapsed = pygame.time.get_ticks() - fade_start
-        alpha = min(1.0, elapsed / fade_duration)
-        if alpha < 1.0:
-            # interpolation visuelle entre les 2 fonds
-            blended = pygame.Surface((W, H)).convert()
-            fade_from_scaled = fade_from.copy()
-            fade_to_scaled = fade_to.copy()
-            fade_to_scaled.set_alpha(int(255 * alpha))
-            blended.blit(fade_from_scaled, (0, 0))
-            blended.blit(fade_to_scaled, (0, 0))
-            frame.blit(blended, (0, 0))
-        else:
-            frame.blit(fade_to, (0, 0))
-            fade_from = None  # transition terminée
+    if bg:
+        surface.blit(bg, (0,0))
     else:
-        # Fond statique
-        if bg_surface:
-            frame.blit(bg_surface, (0, 0))
-        else:
-            frame.fill((0, 0, 0))
+        surface.fill((10,10,10))
 
+    mode_text = SMALL.render("Spotify", True, tcolor)
+    surface.blit(mode_text, (W//2 - mode_text.get_width()//2, 20))
 
-    # nom du mode
-    mode_text = SMALL.render("Spotify", True, text_color)
-    frame.blit(mode_text, (W//2 - mode_text.get_width()//2, 20))
-
-    # pochette
-    if art_surface:
-        frame.blit(art_surface, (W//2 - 150, 60))
+    if art:
+        surface.blit(art, (W//2 - 150, 60))
     else:
         placeholder = SMALL.render("Chargement de l'album...", True, (200,200,200))
-        frame.blit(placeholder, (W//2 - placeholder.get_width()//2, 220))
+        surface.blit(placeholder, (W//2 - placeholder.get_width()//2, 220))
 
-    # titre + artiste
-    title = BIG.render(now_title, True, text_color)
-    artist = FONT.render(now_artist, True, text_color)
-    frame.blit(title, (W//2 - title.get_width()//2, 380))
-    frame.blit(artist, (W//2 - artist.get_width()//2, 410))
+    title_s  = BIG.render(title, True, tcolor)
+    artist_s = FONT.render(artist, True, tcolor)
+    surface.blit(title_s,  (W//2 - title_s.get_width()//2, 380))
+    surface.blit(artist_s, (W//2 - artist_s.get_width()//2, 410))
 
-    # barre progression
-    ratio = min(1.0, max(0.0, progress_ms / float(duration_ms)))
+    try:
+        ratio = min(1.0, max(0.0, float(progress_ms)/float(duration_ms)))
+    except Exception:
+        ratio = 0.0
     bar_y = 450
-    draw_progress_bar(60, bar_y, W-120, 8, ratio)
+    draw_progress_bar(surface, 60, bar_y, W-120, 8, ratio)
     t1 = SMALL.render(ms_str(progress_ms), True, (230,230,230))
     t2 = SMALL.render(ms_str(duration_ms), True, (230,230,230))
-    frame.blit(t1, (60, bar_y+10))
-    frame.blit(t2, (W-60 - t2.get_width(), bar_y+10))
+    surface.blit(t1, (60, bar_y+10))
+    surface.blit(t2, (W-60 - t2.get_width(), bar_y+10))
 
     center_y = 520
-    frame.blit(prev_icon,  (W//2 - 150, center_y))
-    if playing:
-        frame.blit(pause_icon, (W//2 - 32, center_y))
-    else:
-        frame.blit(play_icon, (W//2 - 32, center_y))
-    frame.blit(next_icon,  (W//2 + 86, center_y))
+    surface.blit(prev_icon,   (W//2 - 150, center_y))
+    surface.blit(pause_icon if playing else play_icon, (W//2 - 32, center_y))
+    surface.blit(next_icon,   (W//2 + 86,  center_y))
+    surface.blit(mode_icon, (W//2 - mode_icon.get_width()//2, 640))
 
-    # bouton mode centré en bas
-    frame.blit(mode_icon, (W//2 - mode_icon.get_width()//2, 640))
-
-def render_stats():
-    screen.fill((20,20,25))
-    try:
-        data = requests.get(f"{PC_HELPER_BASE}/metrics", timeout=0.8).json()
-    except Exception:
-        data = {"cpu":"n/a","gpu":"n/a","temp_cpu":"n/a","temp_gpu":"n/a"}
-
+def render_stats(surface):
+    surface.fill((20,20,25))
+    with state_lock:
+        metrics = state.get("metrics", {})
     y = 100
     for label, key in [("CPU","cpu"),("GPU","gpu"),("Temp CPU (°C)","temp_cpu"),("Temp GPU (°C)","temp_gpu")]:
-        val = str(data.get(key,"n/a"))
+        val = str(metrics.get(key,"n/a"))
         line = BIG.render(f"{label}", True, (255,255,255))
-        valr = BIG.render(f"{val}", True, (200,200,200))
-        frame.blit(line, (60, y))
-        frame.blit(valr, (W-60 - valr.get_width(), y))
+        valr = BIG.render(f"{val}",   True, (200,200,200))
+        surface.blit(line, (60, y))
+        surface.blit(valr, (W-60 - valr.get_width(), y))
         y += 60
-
     info = SMALL.render("B4: Revenir à Spotify", True, (200,200,200))
-    frame.blit(info, (W//2 - info.get_width()//2, H - 60))
+    surface.blit(info, (W//2 - info.get_width()//2, H - 60))
 
-# ---------- Controls ----------
-def on_rotate():
-    delta = encoder.steps
-    encoder.steps = 0
-    if delta > 0:
-        media_cmd("vol_down")
-    elif delta < 0:
-        media_cmd("vol_up")
+# ================== THREAD LOGIQUE (Spotify + metrics) ==================
+def logic_loop():
+    last_spotify_poll = 0.0
+    last_metrics_poll = 0.0
+    last_resync = 0.0
+    last_track_id = None
 
-def on_click():
-    media_cmd("playpause")
+    while True:
+        dt_ms = clock.get_time()
+        with state_lock:
+            if state["playing"]:
+                state["progress_ms"] += dt_ms
+                if state["progress_ms"] > state["duration_ms"]:
+                    state["progress_ms"] = state["duration_ms"]
 
-def on_button_press(pin):
-    global mode
-    name = BTN_PINS[pin]
-    if name == "B1_PREV":
-        media_cmd("prev")
-    elif name == "B2_PLAY":
-        media_cmd("playpause")
-    elif name == "B3_NEXT":
-        media_cmd("next")
-    elif name == "B4_MODE":
-        mode = "STATS" if mode == "SPOTIFY" else "SPOTIFY"
+        now = time.time()
 
-encoder.when_rotated = on_rotate
-encoder_button.when_pressed = on_click
-for pin, btn in buttons.items():
-    btn.when_pressed = lambda b=pin: on_button_press(b)
+        if now - last_spotify_poll >= SPOTIFY_POLL_S:
+            try:
+                cur = sp.current_playback() or {}
+                item = cur.get("item") or {}
+                track_id = item.get("id")
 
-# ---------- MAIN LOOP ----------
-fade_start = 0
-fade_duration = 500  # en ms
-fade_from = None
-fade_to = None
+                with state_lock:
+                    state["now_title"] = item.get("name", "—")
+                    state["now_artist"] = ", ".join([a["name"] for a in item.get("artists", [])]) if item else "—"
+                    state["duration_ms"] = item.get("duration_ms") or 1
+                    state["progress_ms"] = cur.get("progress_ms", state["progress_ms"])
+                    state["playing"] = cur.get("is_playing", False)
+                    state["track_id"] = track_id
 
-last_bg_surface = None
-clock = pygame.time.Clock()
-last_sync = time.time()
+                if track_id and track_id != last_track_id:
+                    images = (item.get("album",{}).get("images") or [])
+                    if images:
+                        fetch_and_apply_artwork(images[0]["url"])
+                    last_track_id = track_id
+            except Exception:
+                pass
+            last_spotify_poll = now
 
-try:
+        if now - last_resync >= RESYNC_PROGRESS_S:
+            try:
+                cur = sp.current_playback() or {}
+                with state_lock:
+                    state["progress_ms"] = cur.get("progress_ms", state["progress_ms"])
+                    it = cur.get("item") or {}
+                    if it:
+                        state["duration_ms"] = it.get("duration_ms", state["duration_ms"])
+            except Exception:
+                pass
+            last_resync = now
+
+        if now - last_metrics_poll >= METRICS_POLL_S:
+            poll_metrics()
+            last_metrics_poll = now
+
+        time.sleep(0.2)
+
+# ================== BOUCLE RENDU (pygame) ==================
+def render_loop():
+    with state_lock:
+        if state["bg_surface"] is None:
+            bg = pygame.Surface((W,H)); bg.fill((20,20,20))
+            state["bg_surface"] = bg
+
     while True:
         for e in pygame.event.get():
             if e.type == pygame.QUIT:
-                raise KeyboardInterrupt
+                pygame.quit(); sys.exit()
             if e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE:
-                raise KeyboardInterrupt
+                pygame.quit(); sys.exit()
 
-        # --- dessin principal ---
-        if mode == "SPOTIFY":
-            dt = clock.get_time()
-
-            # progression fluide
-            if playing:
-                progress_ms += dt
-                if progress_ms > duration_ms:
-                    progress_ms = duration_ms
-
-            # resync toutes les 5 secondes
-            if time.time() - last_sync > 5:
-                try:
-                    cur = sp.current_playback()
-                    if cur:
-                        progress_ms = cur.get("progress_ms", progress_ms)
-                        duration_ms = (cur.get("item") or {}).get("duration_ms", duration_ms)
-                    last_sync = time.time()
-                except Exception:
-                    pass
-
-            render_spotify()
-
+        frame.fill((0,0,0))
+        with state_lock:
+            m = state["mode"]
+        if m == "SPOTIFY":
+            render_spotify(frame)
         else:
-            render_stats()
+            render_stats(frame)
 
-        screen.fill((0, 0, 0))
+        screen.fill((0,0,0))
         blit_rotated()
         pygame.display.update()
         clock.tick(FPS)
 
-except KeyboardInterrupt:
-    pygame.quit()
+# ================== LANCEMENT ==================
+if __name__ == "__main__":
+    t_gpio = threading.Thread(target=gpio_loop, daemon=True)
+    t_gpio.start()
+
+    t_logic = threading.Thread(target=logic_loop, daemon=True)
+    t_logic.start()
+
+    render_loop()
