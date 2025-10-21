@@ -236,9 +236,9 @@ def gpio_loop():
             if A == 1:
                 B = GPIO.input(ENC_B)
                 if B == 0:
-                    media_cmd("vol_up")
-                else:
                     media_cmd("vol_down")
+                else:
+                    media_cmd("vol_up")
         time.sleep(0.0015)
 
 # ================== RENDER HELPERS ==================
