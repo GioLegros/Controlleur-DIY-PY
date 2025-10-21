@@ -1,15 +1,11 @@
 from flask import Flask, jsonify, request
-import threading, time, psutil
-import keyboard
-import platform
+import threading, time, psutil, platform, keyboard, pythoncom
 from ctypes import POINTER, cast
 from comtypes import CLSCTX_ALL
 from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+import subprocess, re
 
-
-
-
-# ---- GPU / Temp (NVIDIA via NVML si dispo) ----
+# GPU / NVML
 gpu_ok = False
 try:
     import pynvml
@@ -19,37 +15,82 @@ try:
 except Exception:
     gpu_ok = False
 
-# ---- Volume (Windows, via pycaw) ----
-
-
+# Volume
 sessions = AudioUtilities.GetSpeakers()
-volume = cast(sessions.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None), POINTER(IAudioEndpointVolume))
+volume = cast(
+    sessions.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None),
+    POINTER(IAudioEndpointVolume)
+)
 
 app = Flask(__name__)
 
-def clamp(v, a, b): return max(a, min(b, v))
+# ======================================================
+#   THREAD WMI (pour température CPU)
+# ======================================================
+temp_cpu_cache = "n/a"
 
+def wmi_monitor_thread():
+    global temp_cpu_cache
+    if platform.system() != "Windows":
+        return
+    pythoncom.CoInitialize()  # initialise COM avant d’importer wmi
+    import importlib
+    wmi = importlib.import_module("wmi")
+
+    w = None
+    while True:
+        try:
+            if w is None:
+                try:
+                    w = wmi.WMI(namespace=r"root\wmi")
+                except Exception:
+                    try:
+                        w = wmi.WMI(namespace=r"root\OpenHardwareMonitor")
+                    except Exception:
+                        w = None
+                        temp_cpu_cache = "n/a"
+            if w:
+                try:
+                    temps = w.MSAcpi_ThermalZoneTemperature()
+                    if temps:
+                        temp_cpu_cache = round(
+                            (temps[0].CurrentTemperature / 10.0) - 273.15, 1
+                        )
+                    else:
+                        # fallback via OpenHardwareMonitor
+                        for sensor in w.Sensor():
+                            if sensor.SensorType == "Temperature" and "CPU" in sensor.Name:
+                                temp_cpu_cache = round(sensor.Value, 1)
+                                break
+                except Exception:
+                    temp_cpu_cache = "n/a"
+        except Exception as e:
+            print("[WMI thread]", e)
+            temp_cpu_cache = "n/a"
+        time.sleep(5)
+
+# Lancer le thread au démarrage
+threading.Thread(target=wmi_monitor_thread, daemon=True).start()
+
+# ======================================================
+#   ROUTES
+# ======================================================
 @app.route("/media", methods=["POST"])
 def media():
     data = request.get_json(force=True) or {}
-    cmd  = data.get("cmd","").lower()
+    cmd = data.get("cmd", "").lower()
     if cmd == "playpause":
         keyboard.send("play/pause media")
     elif cmd == "next":
         keyboard.send("next track")
     elif cmd == "prev":
         keyboard.send("previous track")
-    elif cmd == "seek0":
-        # Pas d'événement clavier standard → on laisse le Pi faire via l’API Spotify
-        pass
     elif cmd == "vol_up":
         cur = volume.GetMasterVolumeLevelScalar()
-        volume.SetMasterVolumeLevelScalar(clamp(cur + 0.05, 0.0, 1.0), None)
-        keyboard.send("volume up")
+        volume.SetMasterVolumeLevelScalar(min(cur + 0.05, 1.0), None)
     elif cmd == "vol_down":
         cur = volume.GetMasterVolumeLevelScalar()
-        volume.SetMasterVolumeLevelScalar(clamp(cur - 0.05, 0.0, 1.0), None)
-        keyboard.send("volume down")
+        volume.SetMasterVolumeLevelScalar(max(cur - 0.05, 0.0), None)
     elif cmd == "mute":
         volume.SetMute(1, None)
     elif cmd == "unmute":
@@ -57,55 +98,48 @@ def media():
     return jsonify({"ok": True})
 
 
-
-cpu_value = 0.0
-
-def update_cpu():
-    global cpu_value
+cpu_cache = 0.0
+def cpu_monitor():
+    global cpu_cache
     while True:
-        cpu_value = psutil.cpu_percent(interval=1)
-        time.sleep(1)
+        cpu_cache = psutil.cpu_percent(interval=1)
+threading.Thread(target=cpu_monitor, daemon=True).start()
 
-threading.Thread(target=update_cpu, daemon=True).start()
+def read_gpu_load_smi():
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+            text=True, timeout=0.3
+        )
+        return float(re.findall(r"\d+", out)[0])
+    except Exception:
+        return 0.0
 
 @app.route("/metrics")
 def metrics():
-    if platform.system() == "Windows":
-        import wmi
-        w = wmi.WMI(namespace="root\\wmi")
-
-    temp_cpu = "n/a"
-    try:
-        if platform.system() == "Windows":
-            temperature_info = w.MSAcpi_ThermalZoneTemperature()
-            if temperature_info:
-                temp_cpu = round((temperature_info[0].CurrentTemperature / 10.0) - 273.15, 1)
-        else:
-            t = psutil.sensors_temperatures()
-            if t:
-                for k, v in t.items():
-                    if v:
-                        temp_cpu = v[0].current
-                        break
-    except Exception:
-        pass
-
-    gpu = "n/a"; temp_gpu = "n/a"
+    temp_cpu = temp_cpu_cache
+    gpu = "n/a"
+    gpu = max(0, read_gpu_load_smi() - 25)
+    temp_gpu = "n/a"
     if gpu_ok:
         try:
-            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-            gpu = util.gpu
             temp_gpu = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
         except Exception:
             pass
 
     return jsonify({
-        "cpu": round(cpu_value,1),
+        "cpu": round(cpu_cache, 1),
         "temp_cpu": temp_cpu,
         "gpu": gpu,
         "temp_gpu": temp_gpu
     })
 
+
+# ======================================================
+#   LANCEMENT
+# ======================================================
 if __name__ == "__main__":
-    # Écoute sur toutes interfaces du PC (réseau local)
+    print("📡 Pi Helper Server sur 0.0.0.0:5005")
+    print(" - GPU NVML :", gpu_ok)
+    print(" - Système :", platform.system())
     app.run(host="0.0.0.0", port=5005, debug=False)
