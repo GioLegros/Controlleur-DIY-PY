@@ -1,6 +1,13 @@
 from flask import Flask, jsonify, request
 import threading, time, psutil
 import keyboard
+import platform
+from ctypes import POINTER, cast
+from comtypes import CLSCTX_ALL
+from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+
+
+
 
 # ---- GPU / Temp (NVIDIA via NVML si dispo) ----
 gpu_ok = False
@@ -13,9 +20,7 @@ except Exception:
     gpu_ok = False
 
 # ---- Volume (Windows, via pycaw) ----
-from ctypes import POINTER, cast
-from comtypes import CLSCTX_ALL
-from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+
 
 sessions = AudioUtilities.GetSpeakers()
 volume = cast(sessions.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None), POINTER(IAudioEndpointVolume))
@@ -51,18 +56,37 @@ def media():
         volume.SetMute(0, None)
     return jsonify({"ok": True})
 
+
+
+cpu_value = 0.0
+
+def update_cpu():
+    global cpu_value
+    while True:
+        cpu_value = psutil.cpu_percent(interval=1)
+        time.sleep(1)
+
+threading.Thread(target=update_cpu, daemon=True).start()
+
 @app.route("/metrics")
 def metrics():
-    cpu = psutil.cpu_percent(interval=1)
+    if platform.system() == "Windows":
+        import wmi
+        w = wmi.WMI(namespace="root\\wmi")
+
     temp_cpu = "n/a"
     try:
-        t = psutil.sensors_temperatures()
-        if t:
-            # heuristique courante sous Windows + util cartes mères
-            for k,v in t.items():
-                if v:
-                    temp_cpu = v[0].current
-                    break
+        if platform.system() == "Windows":
+            temperature_info = w.MSAcpi_ThermalZoneTemperature()
+            if temperature_info:
+                temp_cpu = round((temperature_info[0].CurrentTemperature / 10.0) - 273.15, 1)
+        else:
+            t = psutil.sensors_temperatures()
+            if t:
+                for k, v in t.items():
+                    if v:
+                        temp_cpu = v[0].current
+                        break
     except Exception:
         pass
 
@@ -76,7 +100,7 @@ def metrics():
             pass
 
     return jsonify({
-        "cpu": round(cpu,1),
+        "cpu": round(cpu_value,1),
         "temp_cpu": temp_cpu,
         "gpu": gpu,
         "temp_gpu": temp_gpu
