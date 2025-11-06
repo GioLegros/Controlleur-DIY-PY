@@ -139,7 +139,7 @@ def metrics():
 #   LANCEMENT
 # ======================================================
 if __name__ == "__main__":
-    print("📡 Pi Helper Server sur 0.0.0.0:5005")
+    print("Pi Helper Server sur 0.0.0.0:5005")
     print(" - GPU NVML :", gpu_ok)
     print(" - Système :", platform.system())
     app.run(host="0.0.0.0", port=5005, debug=False)
