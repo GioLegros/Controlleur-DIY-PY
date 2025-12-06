@@ -7,6 +7,10 @@ import socket
 APPS = {
     "Steam": r"C:\Program Files (x86)\Steam\steam.exe",
     "Gestionnaire Tâches": "taskmgr.exe",
+    "Discord": r"C:\Users\Giovanni\AppData\Local\Discord\app-1.0.9217\Discord.exe",
+    "Opera": r"C:\Users\Giovanni\AppData\Local\Programs\Opera GX\opera.exe",
+    "Spotify": "explorer.exe spotify:",
+    "VSCode": r"C:\Users\Giovanni\AppData\Local\Programs\Microsoft VS Code\Code.exe",
     # Exemple : "Cyberpunk": r"D:\Games\Cyberpunk 2077\bin\x64\Cyberpunk2077.exe"
 }
 
