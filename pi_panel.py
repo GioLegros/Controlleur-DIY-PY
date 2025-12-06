@@ -25,7 +25,7 @@ def load_config(path):
     if "SPOTIFY_SCOPE" not in cfg:
         cfg["SPOTIFY_SCOPE"] = "user-read-playback-state user-modify-playback-state user-read-currently-playing"
     if "PC_HELPER_BASE" not in cfg:
-        cfg["PC_HELPER_BASE"] = "http://192.168.0.102:5005"
+        cfg["PC_HELPER_BASE"] = "http://192.168.0.103:5005"
     return cfg
 
 cfg = load_config(CONFIG_PATH)
@@ -200,9 +200,15 @@ if IS_RPI:
     GPIO.setup(ENC_SW, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
 def gpio_loop():
-    print("[GPIO] Actif.")
+    print("[GPIO] Boucle active. En attente d'actions...")
+    
+    # 1. Initialisation des états
     last_btn = {p: GPIO.input(p) for p in BTN_PINS}
+    
+    # Pour la molette (Encodeur)
     last_A = GPIO.input(ENC_A)
+    last_SW = GPIO.input(ENC_SW) # On lit l'état initial du clic
+
     while True:
         for pin, name in BTN_PINS.items():
             val = GPIO.input(pin)
@@ -214,13 +220,25 @@ def gpio_loop():
                     with state_lock:
                         state["mode"] = "STATS" if state["mode"]=="SPOTIFY" else "SPOTIFY"
             last_btn[pin] = val
+
+        sw_val = GPIO.input(ENC_SW)
+        if sw_val == 0 and last_SW == 1:
+            print("[GPIO] Clic Molette détecté !")
+            media_cmd("mute") 
+        last_SW = sw_val
+
         A = GPIO.input(ENC_A)
         if A != last_A:
-            last_A = A
             B = GPIO.input(ENC_B)
-            if A == 1:
-                media_cmd("vol_down" if B==0 else "vol_up")
-        time.sleep(0.01)
+            if A == 1: 
+                if B == 0: 
+                    print("[GPIO] Rotation: Vol UP")
+                    media_cmd("vol_up")
+                else:
+                    print("[GPIO] Rotation: Vol DOWN")
+                    media_cmd("vol_down")
+            last_A = A
+        time.sleep(0.001)
 
 # ================== RENDER HELPERS ==================
 def blit_rotated():
