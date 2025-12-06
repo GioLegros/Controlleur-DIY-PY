@@ -1,6 +1,14 @@
 from flask import Flask, jsonify, request
-import threading, time, psutil, platform, keyboard
+import threading, time, psutil, platform, keyboard, subprocess, os
 import socket
+
+# ================== CONFIGURATION DES APPS ==================
+# Astuce: Pour jeux Steam, "steam://rungameid/ID_DU_JEU"
+APPS = {
+    "Steam": r"C:\Program Files (x86)\Steam\steam.exe",
+    "Gestionnaire Tâches": "taskmgr.exe",
+    # Exemple : "Cyberpunk": r"D:\Games\Cyberpunk 2077\bin\x64\Cyberpunk2077.exe"
+}
 
 # ================== GPU INIT (Optionnel) ==================
 gpu_ok = False
@@ -15,7 +23,6 @@ except Exception:
 app = Flask(__name__)
 
 # ================== AUTO-DECOUVERTE (Broadcast) ==================
-# Le PC crie "Je suis là" toutes les 3 sec pour que le Pi le trouve
 def broadcast_presence():
     server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -44,7 +51,6 @@ def wmi_monitor_thread():
     while True:
         try:
             wmi = importlib.import_module("wmi")
-            # Essai via OpenHardwareMonitor (souvent plus fiable pour les Ryzen/Intel récents)
             w = wmi.WMI(namespace=r"root\OpenHardwareMonitor")
             found = False
             for sensor in w.Sensor():
@@ -52,7 +58,6 @@ def wmi_monitor_thread():
                     temp_cpu_cache = round(sensor.Value, 1)
                     found = True
                     break
-            # Fallback standard si OHM n'est pas installé
             if not found:
                 w_std = wmi.WMI(namespace=r"root\wmi")
                 temps = w_std.MSAcpi_ThermalZoneTemperature()
@@ -91,9 +96,27 @@ def media():
     elif cmd == "vol_down":
         keyboard.send("volume down")
     elif cmd == "mute_toggle":
-        keyboard.send("volume mute") # Bascule Mute/Unmute
+        keyboard.send("volume mute")
         
     return jsonify({"ok": True})
+
+# --- LANCER LES APPS ---
+@app.route("/launch", methods=["POST"])
+def launch():
+    try:
+        data = request.get_json(force=True) or {}
+        app_name = data.get("name", "")
+        
+        if app_name in APPS:
+            path = APPS[app_name]
+            print(f"[SYSTEM] Lancement de : {app_name}")
+            subprocess.Popen(path, shell=True)
+            return jsonify({"ok": True, "msg": f"Lancement de {app_name}"})
+        else:
+            return jsonify({"ok": False, "msg": "App inconnue"})
+    except Exception as e:
+        print(f"[ERROR] Launch: {e}")
+        return jsonify({"ok": False, "msg": str(e)})
 
 @app.route("/metrics")
 def metrics():
@@ -117,7 +140,12 @@ def metrics():
         "temp_gpu": temp_gpu
     })
 
+# ================== ROUTE LISTE APPS ==================
+@app.route("/apps_list")
+def apps_list():
+    return jsonify(list(APPS.keys()))
+
 if __name__ == "__main__":
-    print("--- Pi Helper Server (VoiceMeeter Edition) ---")
+    psutil.cpu_percent(interval=None) # Init CPU
     print("Ecoute sur le port 5005...")
     app.run(host="0.0.0.0", port=5005, debug=False)

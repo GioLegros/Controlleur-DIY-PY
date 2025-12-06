@@ -49,7 +49,7 @@ ROTATE_SCREEN = True
 HTTP_TIMEOUT_S = 0.5
 ART_TIMEOUT_S  = 1.5
 SPOTIFY_POLL_S = 1.0
-METRICS_POLL_S = 2.0 # Rafraichissement plus rapide pour les graphes
+METRICS_POLL_S = 2.0 
 
 # ================== PYGAME INIT ==================
 if not DEBUG:
@@ -109,14 +109,14 @@ icon_next = load_icon("next.png")
 icon_play = load_icon("play.png")
 icon_pause = load_icon("pause.png")
 icon_mode = load_icon("mode.png")
-icon_chart = load_icon("mode.png") # Tu pourras changer l'icone plus tard
+icon_chart = load_icon("mode.png") 
 
 # ================== ETAT GLOBAL ==================
 state_lock = threading.Lock()
 last_interaction = time.time()
-SLEEP_TIMEOUT = 300 # secondes avant mise en veille auto
+SLEEP_TIMEOUT = 300 
 state = {
-    "mode": "SPOTIFY",  # SPOTIFY, STATS, MENU
+    "mode": "SPOTIFY",  # SPOTIFY, STATS, LAUNCHER, MENU
     # Spotify
     "title": "En attente...",
     "artist": "",
@@ -130,9 +130,14 @@ state = {
     
     # Metrics
     "metrics": {},
-    "stats_view": "GAUGES", # ou "GRAPHS"
-    "stats_history": [],    # Liste des X dernières mesures
+    "stats_view": "GAUGES", 
+    "stats_history": [],    
     
+    # Launcher (NOUVEAU)
+    "launcher_apps": ["Chargement..."],
+    "launcher_idx": 0,
+    "launcher_status": "",
+
     # Menu
     "menu_idx": 0,
     "menu_msg": "",
@@ -148,7 +153,7 @@ state = {
     ]
 }
 
-MAX_HISTORY = 60 # Nombre de points sur le graphique
+MAX_HISTORY = 60 
 
 # ================== FONCTIONS SYSTEME & API ==================
 sp = Spotify(auth_manager=SpotifyOAuth(
@@ -161,12 +166,28 @@ def pc_cmd(cmd):
     try: requests.post(f"{PC_HELPER_BASE}/media", json={"cmd": cmd}, timeout=HTTP_TIMEOUT_S)
     except: pass
 
+# --- NOUVELLES FONCTIONS LAUNCHER ---
+def launch_app_cmd(app_name):
+    try: 
+        r = requests.post(f"{PC_HELPER_BASE}/launch", json={"name": app_name}, timeout=1.0)
+        return r.json().get("msg", "Erreur")
+    except: return "Erreur Connexion"
+
+def refresh_apps_list():
+    try:
+        r = requests.get(f"{PC_HELPER_BASE}/apps_list", timeout=2.0)
+        apps = r.json()
+        with state_lock:
+            state["launcher_apps"] = apps if apps else ["Aucune App Config"]
+    except: 
+        with state_lock: state["launcher_apps"] = ["Erreur Connexion PC"]
+# ------------------------------------
+
 def get_ip():
     try: return subprocess.check_output(["hostname", "-I"], text=True).split()[0]
     except: return "Pas d'IP"
 
 def set_screen_power(on):
-    """Allume (True) ou éteint (False) l'écran du Raspberry Pi"""
     state["is_sleeping"] = not on
     try:
         cmd = "1" if on else "0"
@@ -313,8 +334,12 @@ def loop_gpio():
                 with state_lock:
                     idx = state["menu_idx"] + direction
                     state["menu_idx"] = max(0, min(idx, len(state["menu_items"])-1))
+            elif curr_mode == "LAUNCHER":
+                with state_lock:
+                    idx = state["launcher_idx"] + direction
+                    state["launcher_idx"] = max(0, min(idx, len(state["launcher_apps"])-1))
             elif curr_mode == "STATS":
-                pass # Molette ne fait rien en mode Stats (ou scroll graphe futur ?)
+                pass 
             else:
                 if direction > 0: pc_cmd("vol_up")
                 else: pc_cmd("vol_down")
@@ -327,14 +352,25 @@ def loop_gpio():
         if sw == 0 and last_sw == 1:
             any_activity = True
             action_to_do = None
+            launch_app = None
+            
             with state_lock: 
                 curr_mode = state["mode"]
                 if curr_mode == "MENU":
                     action_to_do = state["menu_items"][state["menu_idx"]]["act"]
-            
+                elif curr_mode == "LAUNCHER":
+                    launch_app = state["launcher_apps"][state["launcher_idx"]]
+
             if action_to_do: menu_action(action_to_do)
-            elif curr_mode == "SPOTIFY": pc_cmd("mute_toggle")
-            # En mode STATS, clic ne fait rien (ou screenshot ?)
+            elif launch_app:
+                # Thread pour ne pas bloquer
+                def t_launch():
+                    msg = launch_app_cmd(launch_app)
+                    with state_lock: state["launcher_status"] = msg
+                threading.Thread(target=t_launch).start()
+            elif curr_mode == "SPOTIFY": 
+                pc_cmd("mute_toggle")
+            
             time.sleep(0.3)
         last_sw = sw
         
@@ -345,6 +381,7 @@ def loop_gpio():
                 any_activity = True
                 cmd_pc = None
                 action_menu = None
+                launch_btn_app = None
                 change_mode = False
                 toggle_stats = False
                 
@@ -359,11 +396,13 @@ def loop_gpio():
                         elif name == "B3_NEXT": state["menu_idx"] = min(len(state["menu_items"])-1, state["menu_idx"] + 1)
                         elif name == "B2_PLAY": action_menu = state["menu_items"][state["menu_idx"]]["act"]
                     
-                    #b1 and b3 free in STATS
                     elif curr_mode == "STATS":
-                        if name == "B2_PLAY":
-                            toggle_stats = True
-                        
+                        if name == "B2_PLAY": toggle_stats = True
+                    
+                    elif curr_mode == "LAUNCHER":
+                        if name == "B1_PREV": state["launcher_idx"] = max(0, state["launcher_idx"]-1)
+                        elif name == "B3_NEXT": state["launcher_idx"] = min(len(state["launcher_apps"])-1, state["launcher_idx"]+1)
+                        elif name == "B2_PLAY": launch_btn_app = state["launcher_apps"][state["launcher_idx"]]
                         
                     else: # Mode SPOTIFY
                         if name == "B1_PREV": cmd_pc = "prev"
@@ -372,9 +411,15 @@ def loop_gpio():
 
                 if change_mode:
                     with state_lock:
+                        # Cycle: SPOTIFY -> STATS -> LAUNCHER -> MENU
                         if state["mode"] == "SPOTIFY": state["mode"] = "STATS"
-                        elif state["mode"] == "STATS": state["mode"] = "MENU"
+                        elif state["mode"] == "STATS": state["mode"] = "LAUNCHER"
+                        elif state["mode"] == "LAUNCHER": state["mode"] = "MENU"
                         else: state["mode"] = "SPOTIFY"
+                        
+                        # Si on arrive sur Launcher, on refresh
+                        if state["mode"] == "LAUNCHER":
+                            threading.Thread(target=refresh_apps_list).start()
                         state["menu_msg"] = "" 
                 
                 if toggle_stats:
@@ -384,6 +429,11 @@ def loop_gpio():
 
                 if action_menu: menu_action(action_menu)
                 if cmd_pc: pc_cmd(cmd_pc)
+                if launch_btn_app:
+                    def t_launch_btn():
+                        msg = launch_app_cmd(launch_btn_app)
+                        with state_lock: state["launcher_status"] = msg
+                    threading.Thread(target=t_launch_btn).start()
 
             # --- SI ACTIVITÉ DÉTECTÉE ---
             if any_activity:
@@ -434,11 +484,9 @@ def render_spotify_ui(s):
     s.blit(icon_mode, (W//2 - 24, 720))
 
 def draw_chart(s, x, y, w, h, data_points, color, label, max_val=100):
-    # Fond du graphe
     pygame.draw.rect(s, (20,20,30), (x, y, w, h))
     pygame.draw.rect(s, (60,60,70), (x, y, w, h), 1)
     
-    # Label
     lbl = FONT_S.render(label, True, color)
     s.blit(lbl, (x + 5, y + 5))
     
@@ -451,15 +499,12 @@ def draw_chart(s, x, y, w, h, data_points, color, label, max_val=100):
         try: v = float(val)
         except: v = 0
         px = x + (i * step_x)
-        # Inversion Y (0 en bas)
         py = y + h - ((v / max_val) * h)
         points.append((px, py))
     
     if len(points) > 1:
         pygame.draw.lines(s, color, False, points, 2)
-        # Point final
         pygame.draw.circle(s, color, (int(points[-1][0]), int(points[-1][1])), 4)
-        # Valeur actuelle texte
         curr_val = FONT_M.render(f"{data_points[-1]}", True, (255,255,255))
         s.blit(curr_val, (x + w - 45, y + 5))
 
@@ -470,10 +515,10 @@ def render_stats_ui(s):
     with state_lock: 
         view = state["stats_view"]
         mets = state["metrics"]
-        hist = list(state["stats_history"]) # Copie pour thread safety
+        hist = list(state["stats_history"])
     
     if view == "GAUGES":
-        # --- VUE JAUGES (ANCIENNE) ---
+        # --- VUE JAUGES ---
         y = 130
         for label, key, unit in [("CPU Load", "cpu", "%"), ("CPU Temp", "temp_cpu", "°C"),
                                  ("GPU Load", "gpu", "%"), ("GPU Temp", "temp_gpu", "°C")]:
@@ -494,13 +539,11 @@ def render_stats_ui(s):
             s.blit(val_surf, (W - 40 - val_surf.get_width(), y))
             y += 100
             
-        # Indication bouton
         hint = FONT_S.render("[PLAY] -> Voir Graphiques", True, (100,100,100))
         s.blit(hint, (W//2 - hint.get_width()//2, 600))
         
     else:
-        # --- VUE GRAPHIQUES (NOUVELLE) ---
-        # Préparation des données
+        # --- VUE GRAPHIQUES ---
         cpu_loads = [d.get("cpu",0) for d in hist]
         gpu_loads = [d.get("gpu",0) for d in hist]
         cpu_temps = [d.get("temp_cpu",0) for d in hist]
@@ -520,6 +563,42 @@ def render_stats_ui(s):
         s.blit(hint, (W//2 - hint.get_width()//2, 680))
 
     s.blit(icon_mode, (W//2 - 24, 720))
+
+def render_launcher_ui(s):
+    s.fill((25, 20, 35)) # Fond violet sombre
+    render_text_centered(s, "APP LAUNCHER", FONT_XL, (255, 0, 150), 60)
+    pygame.draw.line(s, (255,0,150), (40, 90), (W-40, 90), 3)
+    
+    with state_lock:
+        apps = state["launcher_apps"]
+        idx = state["launcher_idx"]
+        status = state["launcher_status"]
+    
+    start_y = 150
+    # Affiche 5 items autour de la sélection
+    for i in range(idx-2, idx+3):
+        if 0 <= i < len(apps):
+            is_sel = (i == idx)
+            lbl = apps[i]
+            y_pos = start_y + (i - (idx-2)) * 80
+            
+            col = (255, 255, 255) if is_sel else (100, 100, 100)
+            font = FONT_L if is_sel else FONT_M
+            
+            if is_sel:
+                # Cadre sélection
+                r = pygame.Rect(40, y_pos - 25, W-80, 60)
+                pygame.draw.rect(s, (255, 0, 150), r, border_radius=10)
+                pygame.draw.rect(s, (50, 0, 50), r.inflate(-4,-4), border_radius=10)
+            
+            render_text_centered(s, lbl, font, col, y_pos)
+
+    if status:
+        pygame.draw.rect(s, (20,20,20), (0, H-100, W, 100))
+        render_text_centered(s, status, FONT_M, (0,255,0), H-50)
+    
+    hint = FONT_S.render("[PLAY] Lancer App", True, (150,150,150))
+    s.blit(hint, (W//2 - hint.get_width()//2, 750))
 
 def render_menu_ui(s):
     s.fill((30, 30, 35))
@@ -561,7 +640,11 @@ def render_menu_ui(s):
 if __name__ == "__main__":
     threading.Thread(target=loop_spotify, daemon=True).start()
     threading.Thread(target=loop_gpio, daemon=True).start()
-    print("[INFO] Démarrage PiPanel avec Veille...")
+    
+    # Appel initial pour la liste des apps
+    threading.Thread(target=refresh_apps_list).start()
+
+    print("[INFO] Démarrage PiPanel avec Veille & Launcher...")
     set_screen_power(True)
 
     while True:
@@ -588,6 +671,7 @@ if __name__ == "__main__":
             frame.fill((0,0,0))
             if m == "SPOTIFY": render_spotify_ui(frame)
             elif m == "STATS": render_stats_ui(frame)
+            elif m == "LAUNCHER": render_launcher_ui(frame)
             elif m == "MENU": render_menu_ui(frame)
             
             if ROTATE_SCREEN and not DEBUG:
