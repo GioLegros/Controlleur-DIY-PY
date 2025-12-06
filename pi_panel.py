@@ -127,20 +127,22 @@ def rotary_callback(channel):
 
 # ================== PYGAME INIT ==================
 if not DEBUG:
-    # On garde juste la config de la souris (Tactile)
+    # Paramètres d'origine pour le tactile
+    os.environ["SDL_FBDEV"] = "/dev/fb0"
     os.environ["SDL_MOUSEDRV"] = "TSLIB"
     os.environ["SDL_MOUSEDEV"] = "/dev/input/touchscreen"
     
-    # On NE FORCE PAS le driver vidéo. On laisse Pygame utiliser X11 (le bureau)
-    # os.environ["SDL_VIDEODRIVER"] = "dummy" # Ligne supprimée/commentée
+    # IMPORTANT : Comme tu es sur le bureau (autostart), on force "x11".
+    # Cela permet le vrai plein écran sans l'erreur kmsdrm.
+    os.environ["SDL_VIDEODRIVER"] = "x11"
 
 pygame.init()
 
 if DEBUG:
     screen = pygame.display.set_mode((W, H))
 else:
-    # En mode bureau, on enlève le cadre de la fenêtre pour faire "plein écran"
-    screen = pygame.display.set_mode((W, H), pygame.NOFRAME)
+    # ON REMET LE VRAI PLEIN ÉCRAN ICI
+    screen = pygame.display.set_mode((W, H), pygame.FULLSCREEN)
     pygame.mouse.set_visible(False)
 
 # Fonts & Assets
