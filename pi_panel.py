@@ -79,7 +79,7 @@ else:
     screen = pygame.display.set_mode((W, H), pygame.FULLSCREEN)
     pygame.mouse.set_visible(False)
     pygame.display.set_caption("PiPanel")
-    
+
 # Fonts
 try:
     FONT_S = pygame.font.SysFont("Inter", 20)
@@ -333,19 +333,17 @@ def loop_gpio():
                         elif name == "B3_NEXT": state["menu_idx"] = min(len(state["menu_items"])-1, state["menu_idx"] + 1)
                         elif name == "B2_PLAY": action_menu = state["menu_items"][state["menu_idx"]]["act"]
                     
+                    #b1 and b3 free in STATS
                     elif curr_mode == "STATS":
-                        # BOUTONS DÉCONNECTÉS DE SPOTIFY ICI
                         if name == "B2_PLAY":
-                            # Bascule Jauges <-> Graphes
                             toggle_stats = True
-                        # B1 et B3 ne font rien ici pour l'instant
+                        
                         
                     else: # Mode SPOTIFY
                         if name == "B1_PREV": cmd_pc = "prev"
                         elif name == "B2_PLAY": cmd_pc = "playpause"
                         elif name == "B3_NEXT": cmd_pc = "next"
 
-                # Actions hors Lock
                 if change_mode:
                     with state_lock:
                         if state["mode"] == "SPOTIFY": state["mode"] = "STATS"
@@ -472,21 +470,14 @@ def render_stats_ui(s):
         gpu_loads = [d.get("gpu",0) for d in hist]
         cpu_temps = [d.get("temp_cpu",0) for d in hist]
         gpu_temps = [d.get("temp_gpu",0) for d in hist]
-        
-        # Graphe 1: CHARGE (Load)
-        draw_chart(s, 20, 100, W-40, 200, cpu_loads, (0, 200, 255), "CPU Load (%)")
-        draw_chart(s, 20, 100, W-40, 200, gpu_loads, (0, 255, 100), "GPU Load (%) - Vert", 100) # Superposé c'est moche, on sépare
-        
-        # On refait proprement : 3 Zones
-        
+                
         # Zone 1 : CPU
         draw_chart(s, 20, 100, W-40, 180, cpu_loads, (0, 200, 255), "CPU Load (%)")
         
         # Zone 2 : GPU
         draw_chart(s, 20, 300, W-40, 180, gpu_loads, (0, 255, 100), "GPU Load (%)")
         
-        # Zone 3 : Temperatures (CPU en rouge, GPU en orange sur le même graphe ou séparé)
-        # Faisons séparé pour clarté
+        # Zone 3 : Températures
         draw_chart(s, 20, 500, (W-50)//2, 150, cpu_temps, (255, 100, 100), "CPU Temp", 100)
         draw_chart(s, W//2 + 5, 500, (W-50)//2, 150, gpu_temps, (255, 180, 50), "GPU Temp", 100)
         

@@ -97,13 +97,11 @@ def media():
 
 @app.route("/metrics")
 def metrics():
-    # GPU
     temp_gpu = "n/a"
     load_gpu = 0
     if gpu_ok:
         try:
             temp_gpu = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
-            # Lecture charge GPU via nvidia-smi (plus stable que nvml pour le load parfois)
             import subprocess, re
             out = subprocess.check_output(
                 ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
