@@ -113,6 +113,8 @@ icon_chart = load_icon("mode.png") # Tu pourras changer l'icone plus tard
 
 # ================== ETAT GLOBAL ==================
 state_lock = threading.Lock()
+last_interaction = time.time()
+SLEEP_TIMEOUT = 300 # secondes avant mise en veille auto
 state = {
     "mode": "SPOTIFY",  # SPOTIFY, STATS, MENU
     # Spotify
@@ -134,8 +136,11 @@ state = {
     # Menu
     "menu_idx": 0,
     "menu_msg": "",
+    "sleep_enabled": True,
+    "is_sleeping": False,
     "menu_items": [
         {"lbl": "Retour Spotify", "act": "BACK"},
+        {"lbl": "Veille Auto: ON", "act": "TOGGLE_SLEEP"},
         {"lbl": "Afficher IP",    "act": "SHOW_IP"},
         {"lbl": "Scan Wi-Fi",     "act": "WIFI"},
         {"lbl": "Redémarrer",     "act": "REBOOT"},
@@ -160,6 +165,15 @@ def get_ip():
     try: return subprocess.check_output(["hostname", "-I"], text=True).split()[0]
     except: return "Pas d'IP"
 
+def set_screen_power(on):
+    """Allume (True) ou éteint (False) l'écran du Raspberry Pi"""
+    state["is_sleeping"] = not on
+    try:
+        cmd = "1" if on else "0"
+        subprocess.run(["vcgencmd", "display_power", cmd], stdout=subprocess.DEVNULL)
+    except:
+        pass 
+
 def get_wifi_list():
     try:
         out = subprocess.check_output("nmcli -f SSID dev wifi | tail -n +2", shell=True, text=True)
@@ -171,6 +185,13 @@ def menu_action(act):
         if act == "BACK":
             state["mode"] = "SPOTIFY"
             state["menu_msg"] = ""
+        elif act == "TOGGLE_SLEEP":
+            state["sleep_enabled"] = not state["sleep_enabled"]
+            status = "ON" if state["sleep_enabled"] else "OFF"
+            for item in state["menu_items"]:
+                if "Veille Auto" in item["lbl"]:
+                    item["lbl"] = f"Veille Auto: {status}"
+                    break
         elif act == "SHOW_IP":
             state["menu_msg"] = f"IP: {get_ip()}"
         elif act == "WIFI":
@@ -262,6 +283,7 @@ def loop_spotify():
 
 # ================== GPIO INPUT ==================
 def loop_gpio():
+    global last_interaction
     if DEBUG: return
     import RPi.GPIO as GPIO
     GPIO.setmode(GPIO.BCM)
@@ -276,9 +298,12 @@ def loop_gpio():
     last_clk = GPIO.input(ENC_A)
     
     while True:
+        # --- GESTION DU REVEIL ---
+        any_activity = False
         # --- ENCODEUR ---
         clk = GPIO.input(ENC_A)
         if clk != last_clk:
+            any_activity = True
             dt = GPIO.input(ENC_B)
             direction = 1 if dt != clk else -1
             
@@ -300,6 +325,7 @@ def loop_gpio():
         # --- CLIC ENCODEUR ---
         sw = GPIO.input(ENC_SW)
         if sw == 0 and last_sw == 1:
+            any_activity = True
             action_to_do = None
             with state_lock: 
                 curr_mode = state["mode"]
@@ -316,7 +342,7 @@ def loop_gpio():
         for pin, name in BTN_PINS.items():
             val = GPIO.input(pin)
             if val == 0 and last_btn[pin] == 1:
-                
+                any_activity = True
                 cmd_pc = None
                 action_menu = None
                 change_mode = False
@@ -358,6 +384,15 @@ def loop_gpio():
 
                 if action_menu: menu_action(action_menu)
                 if cmd_pc: pc_cmd(cmd_pc)
+
+            # --- SI ACTIVITÉ DÉTECTÉE ---
+            if any_activity:
+                last_interaction = time.time()
+                with state_lock: sleeping = state["is_sleeping"]
+                if sleeping:
+                    set_screen_power(True)
+                    time.sleep(0.5) 
+                    continue
 
             last_btn[pin] = val
         time.sleep(0.005)
@@ -526,30 +561,39 @@ def render_menu_ui(s):
 if __name__ == "__main__":
     threading.Thread(target=loop_spotify, daemon=True).start()
     threading.Thread(target=loop_gpio, daemon=True).start()
-    print("[INFO] Démarrage PiPanel...")
+    print("[INFO] Démarrage PiPanel avec Veille...")
+    set_screen_power(True)
+
     while True:
         for e in pygame.event.get():
-            if e.type == pygame.QUIT: sys.exit()
-            if DEBUG and e.type == pygame.KEYDOWN:
-                if e.key == pygame.K_m: 
-                    with state_lock: 
-                        if state["mode"]=="SPOTIFY": state["mode"]="STATS"
-                        elif state["mode"]=="STATS": state["mode"]="MENU"
-                        else: state["mode"]="SPOTIFY"
-                if state["mode"] == "STATS" and e.key == pygame.K_SPACE:
-                     with state_lock:
-                        if state["stats_view"] == "GAUGES": state["stats_view"] = "GRAPHS"
-                        else: state["stats_view"] = "GAUGES"
-                        
-        with state_lock: m = state["mode"]
-        frame.fill((0,0,0))
-        if m == "SPOTIFY": render_spotify_ui(frame)
-        elif m == "STATS": render_stats_ui(frame)
-        elif m == "MENU": render_menu_ui(frame)
+            if e.type == pygame.QUIT:
+                set_screen_power(True)
+                sys.exit()
         
-        if ROTATE_SCREEN and not DEBUG:
-            rot = pygame.transform.rotate(frame, -90)
-            screen.blit(rot, rot.get_rect(center=screen.get_rect().center))
-        else: screen.blit(frame, (0,0))
-        pygame.display.flip()
-        clock.tick(FPS)
+        now = time.time()
+        with state_lock:
+            enabled = state["sleep_enabled"]
+            sleeping = state["is_sleeping"]
+            
+        if enabled and not sleeping and (now - last_interaction > SLEEP_TIMEOUT):
+            print("[INFO] Mise en veille...")
+            set_screen_power(False)
+            
+        if sleeping:
+            screen.fill((0,0,0))
+            pygame.display.flip()
+            time.sleep(0.5)
+        else:
+            with state_lock: m = state["mode"]
+            frame.fill((0,0,0))
+            if m == "SPOTIFY": render_spotify_ui(frame)
+            elif m == "STATS": render_stats_ui(frame)
+            elif m == "MENU": render_menu_ui(frame)
+            
+            if ROTATE_SCREEN and not DEBUG:
+                rot = pygame.transform.rotate(frame, -90)
+                screen.blit(rot, rot.get_rect(center=screen.get_rect().center))
+            else: screen.blit(frame, (0,0))
+            
+            pygame.display.flip()
+            clock.tick(FPS)
