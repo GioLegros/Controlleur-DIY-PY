@@ -127,23 +127,20 @@ def rotary_callback(channel):
 
 # ================== PYGAME INIT ==================
 if not DEBUG:
-    os.environ["SDL_FBDEV"] = "/dev/fb0"
+    # On garde juste la config de la souris (Tactile)
     os.environ["SDL_MOUSEDRV"] = "TSLIB"
     os.environ["SDL_MOUSEDEV"] = "/dev/input/touchscreen"
-    # Drivers communs
-    drivers = ["fbcon", "directfb", "kmsdrm"] 
-    found = False
-    for d in drivers:
-        if not found:
-            os.environ["SDL_VIDEODRIVER"] = d
-            try: pygame.display.init(); found = True
-            except: pass
+    
+    # On NE FORCE PAS le driver vidéo. On laisse Pygame utiliser X11 (le bureau)
+    # os.environ["SDL_VIDEODRIVER"] = "dummy" # Ligne supprimée/commentée
+
 pygame.init()
 
 if DEBUG:
     screen = pygame.display.set_mode((W, H))
 else:
-    screen = pygame.display.set_mode((W, H), pygame.FULLSCREEN)
+    # En mode bureau, on enlève le cadre de la fenêtre pour faire "plein écran"
+    screen = pygame.display.set_mode((W, H), pygame.NOFRAME)
     pygame.mouse.set_visible(False)
 
 # Fonts & Assets
