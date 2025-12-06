@@ -199,10 +199,16 @@ if IS_RPI:
     GPIO.setup(ENC_B, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     GPIO.setup(ENC_SW, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
+# ================== GPIO ==================
+# ... (le début du code GPIO reste pareil)
+
 def gpio_loop():
-    print("[GPIO] Actif.")
+    print("[GPIO] Actif avec gestion du bouton encodeur.")
+    
     last_btn = {p: GPIO.input(p) for p in BTN_PINS}
     last_A = GPIO.input(ENC_A)
+    last_SW = GPIO.input(ENC_SW)
+
     while True:
         for pin, name in BTN_PINS.items():
             val = GPIO.input(pin)
@@ -214,13 +220,23 @@ def gpio_loop():
                     with state_lock:
                         state["mode"] = "STATS" if state["mode"]=="SPOTIFY" else "SPOTIFY"
             last_btn[pin] = val
+
         A = GPIO.input(ENC_A)
         if A != last_A:
-            last_A = A
-            B = GPIO.input(ENC_B)
             if A == 1:
-                media_cmd("vol_down" if B==0 else "vol_up")
-        time.sleep(0.01)
+                B = GPIO.input(ENC_B)
+                media_cmd("vol_down" if B == 0 else "vol_up")
+            last_A = A
+
+
+        SW = GPIO.input(ENC_SW)
+        if SW == 0 and last_SW == 1:
+            print("[GPIO] Clic Encodeur -> Mute Toggle")
+            media_cmd("mute_toggle") 
+            time.sleep(0.3) 
+        last_SW = SW
+
+        time.sleep(0.001) # Soulage le processeur
 
 # ================== RENDER HELPERS ==================
 def blit_rotated():
