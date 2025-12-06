@@ -57,28 +57,30 @@ if not DEBUG:
     os.environ["SDL_FBDEV"] = "/dev/fb0"
     os.environ["SDL_MOUSEDRV"] = "TSLIB"
     os.environ["SDL_MOUSEDEV"] = "/dev/input/touchscreen"
-    drivers = ["fbcon", "directfb", "kmsdrm", "x11"]
-    found = False
-    for driver in drivers:
-        if not os.getenv("SDL_VIDEODRIVER"):
-            os.environ["SDL_VIDEODRIVER"] = driver
+    for driver in ["fbcon", "directfb", "kmsdrm", "x11"]:
         try:
-            pygame.display.init()
-            found = True
+            os.environ["SDL_VIDEODRIVER"] = driver
+            import pygame as _pg_test
+            _pg_test.display.init()
+            print(f"Driver SDL utilisé : {driver}")
             break
         except Exception:
-            continue
-    if not found: sys.exit("Aucun driver vidéo SDL trouvé.")
+            print(f"Driver SDL non disponible : {driver}")
+    else:
+        sys.exit("Aucun driver vidéo compatible trouvé. Essaie avec 'startx'.")
+else:
+    print("[DEBUG] Mode debug activé — pas de framebuffer, pas de GPIO")
 
 pygame.init()
-pygame.font.init()
-
 if DEBUG:
     screen = pygame.display.set_mode((W, H))
     pygame.display.set_caption("PiPanel DEBUG")
+    pygame.mouse.set_visible(True)
 else:
     screen = pygame.display.set_mode((W, H), pygame.FULLSCREEN)
     pygame.mouse.set_visible(False)
+    pygame.display.set_caption("PiPanel")
+
 
 # Fonts
 try:
