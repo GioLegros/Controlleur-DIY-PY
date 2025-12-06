@@ -117,6 +117,7 @@ icon_mode = load_icon("mode.png")
 state_lock = threading.Lock()
 state = {
     "mode": "SPOTIFY",  # SPOTIFY, STATS, MENU
+
     # Spotify
     "title": "En attente...",
     "artist": "",
@@ -127,8 +128,10 @@ state = {
     "bg_surf": None,
     "track_id": None,
     "text_col": (255,255,255),
+
     # Metrics
     "metrics": {},
+
     # Menu
     "menu_idx": 0,
     "menu_msg": "", # Pour afficher IP ou résultats
@@ -295,19 +298,26 @@ def loop_gpio():
                 else: pc_cmd("vol_down")
             
             last_clk = clk
-            time.sleep(0.002) # Anti-rebond light
+            time.sleep(0.002)
 
         # --- CLIC ENCODEUR (Mute ou Valider) ---
         sw = GPIO.input(ENC_SW)
         if sw == 0 and last_sw == 1:
-            with state_lock: curr_mode = state["mode"]
+            action_to_do = None # Variable temporaire
             
-            if curr_mode == "MENU":
-                with state_lock:
+            with state_lock: 
+                curr_mode = state["mode"]
+                if curr_mode == "MENU":
+                    # On récupère l'action MAIS on ne la lance pas encore
                     item = state["menu_items"][state["menu_idx"]]
-                menu_action(item["act"])
-            else:
+                    action_to_do = item["act"]
+            
+            # On est SORTI du lock ici, on peut lancer l'action sans bloquer
+            if action_to_do:
+                menu_action(action_to_do)
+            elif curr_mode != "MENU":
                 pc_cmd("mute_toggle")
+                
             time.sleep(0.3)
         last_sw = sw
         
@@ -315,33 +325,45 @@ def loop_gpio():
         for pin, name in BTN_PINS.items():
             val = GPIO.input(pin)
             if val == 0 and last_btn[pin] == 1:
-                with state_lock: curr_mode = state["mode"]
                 
-                # --- ACTIONS SELON LE MODE ---
-                if name == "B4_MODE":
-                    # Cycle: SPOTIFY -> STATS -> MENU -> SPOTIFY
+                # On prépare les variables pour agir APRES le lock
+                cmd_pc = None
+                action_menu = None
+                change_mode = False
+                
+                with state_lock: 
+                    curr_mode = state["mode"]
+                    
+                    if name == "B4_MODE":
+                        change_mode = True
+                    elif curr_mode == "MENU":
+                        if name == "B1_PREV": 
+                            state["menu_idx"] = max(0, state["menu_idx"] - 1)
+                        elif name == "B3_NEXT": 
+                            state["menu_idx"] = min(len(state["menu_items"])-1, state["menu_idx"] + 1)
+                        elif name == "B2_PLAY": 
+                            # On note l'action à faire
+                            item = state["menu_items"][state["menu_idx"]]
+                            action_menu = item["act"]
+                    else:
+                        # Commandes PC
+                        if name == "B1_PREV": cmd_pc = "prev"
+                        elif name == "B2_PLAY": cmd_pc = "playpause"
+                        elif name == "B3_NEXT": cmd_pc = "next"
+
+                # --- EXECUTION HORS DU LOCK ---
+                if change_mode:
                     with state_lock:
                         if state["mode"] == "SPOTIFY": state["mode"] = "STATS"
                         elif state["mode"] == "STATS": state["mode"] = "MENU"
                         else: state["mode"] = "SPOTIFY"
-                        state["menu_msg"] = "" # Reset msg
+                        state["menu_msg"] = "" 
 
-                elif curr_mode == "MENU":
-                    # Navigation au bouton (Backup si molette cassée)
-                    with state_lock:
-                        if name == "B1_PREV": # Haut
-                            state["menu_idx"] = max(0, state["menu_idx"] - 1)
-                        elif name == "B3_NEXT": # Bas
-                            state["menu_idx"] = min(len(state["menu_items"])-1, state["menu_idx"] + 1)
-                        elif name == "B2_PLAY": # Valider
-                            item = state["menu_items"][state["menu_idx"]]
-                            menu_action(item["act"])
-
-                else:
-                    # Media Controls (Spotify/Stats)
-                    if name == "B1_PREV": pc_cmd("prev")
-                    elif name == "B2_PLAY": pc_cmd("playpause")
-                    elif name == "B3_NEXT": pc_cmd("next")
+                if action_menu:
+                    menu_action(action_menu)
+                
+                if cmd_pc:
+                    pc_cmd(cmd_pc)
 
             last_btn[pin] = val
             
