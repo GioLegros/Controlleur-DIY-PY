@@ -230,7 +230,7 @@ def menu_action(act):
             def t_update():
                 try:
                     path = Path(__file__).parent
-                    out = subprocess.check_output(["git", "pull", "origin", "main"], cwd=path, stderr=subprocess.STDOUT, text=True)
+                    out = subprocess.check_output(["git", "pull", "origin", "master"], cwd=path, stderr=subprocess.STDOUT, text=True)
                     if "Already up to date" in out:
                         with state_lock: state["menu_msg"] = "Déjà à jour."
                         time.sleep(2)
