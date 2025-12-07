@@ -145,7 +145,7 @@ state = {
     # Menu
     "menu_idx": 0,
     "menu_msg": "",
-    "sleep_enabled": False,
+    "sleep_enabled": True,
     "is_sleeping": False,
     "menu_items": [
         {"lbl": "Retour Spotify", "act": "BACK"},
@@ -346,7 +346,7 @@ def loop_gpio():
     global last_interaction
     if DEBUG: return 
     
-    import RPi.GPIO as GPIO
+    import RPi.GPIO as GPIO # type: ignore
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
     for p in BTN_PINS: GPIO.setup(p, GPIO.IN, pull_up_down=GPIO.PUD_UP)

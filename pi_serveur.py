@@ -138,15 +138,31 @@ def launch():
 def mixer_list():
     if not AUDIO_OK: return jsonify([])
     sessions_list = []
+    seen_names = set()
+    
     try:
         pythoncom.CoInitialize()
         sessions = AudioUtilities.GetAllSessions()
         for session in sessions:
-            if session.Process:
+            name = None
+            if session.Process and session.Process.name():
                 name = session.Process.name().replace(".exe", "")
-                vol = session.SimpleAudioVolume.GetMasterVolume()
-                sessions_list.append({"name": name, "vol": int(vol * 100)})
-    except: pass
+            if not name:
+                try: 
+                    name = session.DisplayName
+                    if name and "@" in name: name = None 
+                except: pass
+            if name and name.lower() not in ["system", "idle", "", "shell experience host"]:
+                if name not in seen_names:
+                    vol = session.SimpleAudioVolume.GetMasterVolume()
+                    sessions_list.append({"name": name, "vol": int(vol * 100)})
+                    seen_names.add(name)
+                    print(f"[MIXER] Trouvé: {name} - {int(vol*100)}%")
+
+    except Exception as e:
+        print(f"[ERROR] Mixer: {e}")
+    
+    sessions_list.sort(key=lambda x: x["name"])
     return jsonify(sessions_list)
 
 @app.route("/mixer/set", methods=["POST"])
