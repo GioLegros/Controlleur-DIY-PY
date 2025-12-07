@@ -7,7 +7,7 @@ try:
     import pythoncom
     AUDIO_OK = True
 except:
-    AUDIO_OK = True
+    AUDIO_OK = False
 
 # ================== CONFIGURATION DES APPS ==================
 # Astuce: Pour jeux Steam, "steam://rungameid/ID_DU_JEU"

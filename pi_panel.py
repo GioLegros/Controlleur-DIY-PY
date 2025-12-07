@@ -329,7 +329,7 @@ def loop_spotify():
 # ================== GPIO INPUT ==================
 def loop_gpio():
     global last_interaction
-    if DEBUG: return # En mode DEBUG, on sort immédiatement car pas de GPIO
+    if DEBUG: return 
     
     import RPi.GPIO as GPIO # pyright: ignore[reportMissingModuleSource] because windows env
     GPIO.setmode(GPIO.BCM)
@@ -718,14 +718,15 @@ def render_mixer_ui(s):
     pygame.draw.line(s, (50,150,255), (40, 90), (W-40, 90), 3)
         
     with state_lock:
-        sessions = state["mixer_sessions"]
-        idx = state["mixer_idx"]
+        sessions = state.get("mixer_sessions", [])
+        idx = state.get("mixer_idx", 0)
         
     if not sessions:
         render_text_centered(s, "Aucune application audio", FONT_M, (150,150,150), H//2)
         return
 
     start_y = 150
+    # Affiche 5 items autour de la sélection
     for i in range(idx-2, idx+3):
         if 0 <= i < len(sessions):
             item = sessions[i]
@@ -744,18 +745,18 @@ def render_mixer_ui(s):
             vol = item["vol"]
             bar_w = 200
             pygame.draw.rect(s, (50,50,50), (W-250, y_pos+15, bar_w, 15), border_radius=5)
+            
             c_bar = (50, 255, 50)
             if vol > 80: c_bar = (255, 50, 50)
             elif vol > 60: c_bar = (255, 200, 0)
             
             pygame.draw.rect(s, c_bar, (W-250, y_pos+15, int(bar_w * (vol/100)), 15), border_radius=5)
             
-            s.blit(v_txt, (W-250 + bar_w/2 - v_txt.get_width()/2, y_pos+40))
             v_txt = FONT_M.render(f"{vol}%", True, col)
+            s.blit(v_txt, (W-250 + bar_w/2 - v_txt.get_width()/2, y_pos+40))
 
+    hint = FONT_S.render("[Molette] Volume  -  [Haut/Bas] Choisir", True, (150,150,150))
     s.blit(hint, (W//2 - hint.get_width()//2, 750))
-    hint = FONT_S.render("[Molette] Volume  -  [Gauche/Droite] Choisir", True, (150,150,150))
-         
 
 # ================== MAIN LOOP ==================
 if __name__ == "__main__":
