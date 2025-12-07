@@ -230,12 +230,17 @@ def menu_action(act):
             def t_update():
                 try:
                     path = Path(__file__).parent
-                    out = subprocess.check_output(["git", "pull", "origin", "master"], cwd=path, text=True)
-                    with state_lock: state["menu_msg"] = f"Git: {out.strip()[-20:]}"
-                    time.sleep(2)
-                    with state_lock: state["menu_msg"] = "Relancement..."
-                    time.sleep(1)
-                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                    out = subprocess.check_output(["git", "pull", "origin", "main"], cwd=path, stderr=subprocess.STDOUT, text=True)
+                    if "Already up to date" in out:
+                        with state_lock: state["menu_msg"] = "Déjà à jour."
+                        time.sleep(2)
+                        with state_lock: state["menu_msg"] = ""
+                    else:
+                        with state_lock: state["menu_msg"] = f"Maj OK: {out.strip()[-15:]}"
+                        time.sleep(2)
+                        with state_lock: state["menu_msg"] = "Relancement..."
+                        time.sleep(1)
+                        os.execv(sys.executable, [sys.executable] + sys.argv)
                 except Exception as e:
                     with state_lock: state["menu_msg"] = f"Err: {e}"
             threading.Thread(target=t_update).start()
@@ -492,6 +497,11 @@ def render_spotify_ui(s):
     pygame.draw.rect(s, (80,80,80), (bar_x, 540, bar_w, bar_h), border_radius=4)
     pygame.draw.rect(s, col, (bar_x, 540, int(bar_w*ratio), bar_h), border_radius=4)
     
+    t1 = FONT_S.render(ms_str(prog), True, (200,200,200))
+    t2 = FONT_S.render(ms_str(dur), True, (200,200,200))
+    s.blit(t1, (bar_x, 555))
+    s.blit(t2, (bar_x + bar_w - t2.get_width(), 555))
+
     btn_y = 620
     s.blit(icon_prev, (W//2 - 140, btn_y))
     s.blit(icon_pause if playing else icon_play, (W//2 - 32, btn_y))
@@ -522,6 +532,16 @@ def draw_chart(s, x, y, w, h, data_points, color, label, max_val=100):
         pygame.draw.circle(s, color, (int(points[-1][0]), int(points[-1][1])), 4)
         curr_val = FONT_M.render(f"{data_points[-1]}", True, (255,255,255))
         s.blit(curr_val, (x + w - 45, y + 5))
+
+def get_rpi_temp():
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+            return round(int(f.read()) / 1000, 1)
+    except: return 0
+
+def ms_str(ms):
+    s = int(ms / 1000)
+    return f"{s//60}:{s%60:02d}"
 
 def render_stats_ui(s):
     s.fill((10,10,15))
@@ -576,6 +596,11 @@ def render_stats_ui(s):
         
         hint = FONT_S.render("[PLAY] -> Voir Jauges", True, (100,100,100))
         s.blit(hint, (W//2 - hint.get_width()//2, 680))
+
+    rpi_t = get_rpi_temp()
+    pygame.draw.rect(s, (30,30,35), (0, H-40, W, 40))
+    t_msg = FONT_S.render(f"RPI Temp: {rpi_t}°C", True, (150,150,150))
+    s.blit(t_msg, (W//2 - t_msg.get_width()//2, H-30))
 
     s.blit(icon_mode, (W//2 - 24, 720))
 
