@@ -274,21 +274,20 @@ def fetch_art(url):
     except: pass
 
 # ================== LOGIQUE THREADS ==================
-def loop_spotify():
+def logic_loop():
     last_t = 0
     last_m = 0
+    last_mix = 0
+    
     while True:
         now = time.time()
         
-        # --- SPOTIFY POLL ---
+        # --- 1. SPOTIFY POLL (Toutes les 1s) ---
         if now - last_t > SPOTIFY_POLL_S:
             try:
                 pb = sp.current_playback()
                 if pb and pb.get("item"):
                     item = pb["item"]
-                    is_play = pb["is_playing"]
-                    prog = pb["progress_ms"]
-                    dur = item["duration_ms"]
                     tid = item["id"]
                     with state_lock:
                         if tid != state["track_id"]:
@@ -298,28 +297,44 @@ def loop_spotify():
                             if imgs: threading.Thread(target=fetch_art, args=(imgs[0]["url"],)).start()
                         state["title"] = item["name"]
                         state["artist"] = item["artists"][0]["name"]
-                        state["playing"] = is_play
-                        state["duration"] = dur
-                        state["progress"] = prog
+                        state["playing"] = pb["is_playing"]
+                        state["duration"] = item["duration_ms"]
+                        state["progress"] = pb["progress_ms"]
             except: pass
             last_t = now
             
-        # --- METRICS POLL & HISTORY ---
+        # --- 2. METRICS POLL (Toutes les 2s) ---
         if now - last_m > METRICS_POLL_S:
             try:
                 r = requests.get(f"{PC_HELPER_BASE}/metrics", timeout=0.5)
                 data = r.json()
                 with state_lock: 
                     state["metrics"] = data
-                    # Ajout à l'historique pour les graphes
-                    hist = state["stats_history"]
-                    hist.append(data)
-                    if len(hist) > MAX_HISTORY:
-                        hist.pop(0)
+                    state["stats_history"].append(data)
+                    if len(state["stats_history"]) > MAX_HISTORY:
+                        state["stats_history"].pop(0)
             except: pass
             last_m = now
+
+        # --- 3. MIXER POLL (Toutes les 2s - SANS FREEZE) ---
+        if now - last_mix > 2.0:
+            should_poll = False
+            with state_lock:
+                if state["mode"] == "MIXER": should_poll = True
+            
+            if should_poll:
+                try:
+                    r = requests.get(f"{PC_HELPER_BASE}/mixer/list", timeout=1.5)
+                    sessions = r.json()
+                    
+                    with state_lock:
+                        old_idx = state["mixer_idx"]
+                        state["mixer_sessions"] = sessions
+                        if sessions:
+                            state["mixer_idx"] = min(old_idx, len(sessions)-1)
+                except: pass
+            last_mix = now
         
-        # Smooth progress bar
         with state_lock:
             if state["playing"]:
                 state["progress"] = min(state["progress"] + 200, state["duration"])
@@ -331,7 +346,7 @@ def loop_gpio():
     global last_interaction
     if DEBUG: return 
     
-    import RPi.GPIO as GPIO # pyright: ignore[reportMissingModuleSource] because windows env
+    import RPi.GPIO as GPIO # pyright: ignore[reportMissingModuleSource]
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
     for p in BTN_PINS: GPIO.setup(p, GPIO.IN, pull_up_down=GPIO.PUD_UP)
@@ -342,26 +357,10 @@ def loop_gpio():
     last_btn = {p:1 for p in BTN_PINS}
     last_sw = 1
     last_clk = GPIO.input(ENC_A)
-    last_mix = 0
     
     while True:
         now = time.time()
         any_activity = False
-
-        # --- POLL MIXER (Toutes les 2 sec) ---
-        if now - last_mix > 2.0:
-            with state_lock: m = state["mode"]
-            if m == "MIXER":
-                try:
-                    r = requests.get(f"{PC_HELPER_BASE}/mixer/list", timeout=1.0)
-                    sessions = r.json()
-                    with state_lock:
-                        old_idx = state["mixer_idx"]
-                        state["mixer_sessions"] = sessions
-                        if sessions:
-                            state["mixer_idx"] = min(old_idx, len(sessions)-1)
-                except: pass
-            last_mix = now
 
         # --- ENCODEUR (Rotation) ---
         clk = GPIO.input(ENC_A)
@@ -468,6 +467,7 @@ def loop_gpio():
 
                 if change_mode:
                     with state_lock:
+                        # Cycle: SPOTIFY -> STATS -> MIXER -> LAUNCHER -> MENU
                         if state["mode"] == "SPOTIFY": state["mode"] = "STATS"
                         elif state["mode"] == "STATS": state["mode"] = "MIXER"
                         elif state["mode"] == "MIXER": state["mode"] = "LAUNCHER"
@@ -760,10 +760,9 @@ def render_mixer_ui(s):
 
 # ================== MAIN LOOP ==================
 if __name__ == "__main__":
-    threading.Thread(target=loop_spotify, daemon=True).start()
+    threading.Thread(target=logic_loop, daemon=True).start()
     threading.Thread(target=loop_gpio, daemon=True).start()
     
-    # Appel initial pour la liste des apps
     threading.Thread(target=refresh_apps_list).start()
 
     print("[INFO] Démarrage PiPanel avec Veille & Launcher...")
