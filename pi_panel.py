@@ -230,7 +230,7 @@ def menu_action(act):
             def t_update():
                 try:
                     path = Path(__file__).parent
-                    out = subprocess.check_output(["git", "pull", "origin", "main"], cwd=path, text=True)
+                    out = subprocess.check_output(["git", "pull", "origin", "master"], cwd=path, text=True)
                     with state_lock: state["menu_msg"] = f"Git: {out.strip()[-20:]}"
                     time.sleep(2)
                     with state_lock: state["menu_msg"] = "Relancement..."
