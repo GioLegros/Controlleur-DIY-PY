@@ -21,3 +21,6 @@ ENV/
 # Fichiers système
 .DS_Store
 Thumbs.db
+
+# Environnements construits 
+build/

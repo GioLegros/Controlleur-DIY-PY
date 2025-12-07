@@ -14,142 +14,141 @@ APPS = {
     # Exemple : "Cyberpunk": r"D:\Games\Cyberpunk 2077\bin\x64\Cyberpunk2077.exe"
 }
 
-# ================== GPU INIT (Optionnel) ==================
+# ================== GLOBALES & INIT ==================
 gpu_ok = False
-try:
-    import pynvml
-    pynvml.nvmlInit()
-    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-    gpu_ok = True
-except Exception:
-    gpu_ok = False
+nvml_handle = None
+
+# Variables "Cache" pour stocker les valeurs lissées
+cache_cpu_load = 0.0
+cache_gpu_load = 0
+cache_cpu_temp = "n/a"
+
+def init_gpu():
+    global gpu_ok, nvml_handle
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        gpu_ok = True
+    except: pass
 
 app = Flask(__name__)
 
-# ================== AUTO-DECOUVERTE (Broadcast) ==================
-def broadcast_presence():
-    server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    server.settimeout(0.2)
-    message = b"PI_HELPER_SERVER_HERE"
+# ================== THREADS DE MONITORING (LISSAGE) ==================
+
+# 1. Thread "Rapide" : Calcule la charge CPU/GPU sur 1 seconde (Moyenne stable)
+def performance_thread():
+    global cache_cpu_load, cache_gpu_load
     
-    print("[SYSTEM] Diffusion de la présence sur le port 5006...")
     while True:
         try:
-            # Envoie à tout le réseau local
-            server.sendto(message, ('<broadcast>', 5006))
+            cache_cpu_load = psutil.cpu_percent(interval=1.0)
+
+            # GPU : On lit juste après
+            if gpu_ok:
+                import pynvml
+                u = pynvml.nvmlDeviceGetUtilizationRates(nvml_handle)
+                cache_gpu_load = u.gpu
+            else:
+                cache_gpu_load = 0
+                
         except Exception:
             pass
-        time.sleep(3)
 
-threading.Thread(target=broadcast_presence, daemon=True).start()
-
-# ================== MONITORING CPU (WMI) ==================
-temp_cpu_cache = "n/a"
-def wmi_monitor_thread():
-    global temp_cpu_cache
+def temp_thread():
+    global cache_cpu_temp
     if platform.system() != "Windows": return
-    import pythoncom, importlib
-    pythoncom.CoInitialize()
-    
+    try:
+        import pythoncom
+        pythoncom.CoInitialize()
+        import wmi
+    except: return
+
     while True:
         try:
-            wmi = importlib.import_module("wmi")
             w = wmi.WMI(namespace=r"root\OpenHardwareMonitor")
             found = False
             for sensor in w.Sensor():
                 if sensor.SensorType == "Temperature" and "CPU" in sensor.Name:
-                    temp_cpu_cache = round(sensor.Value, 1)
+                    cache_cpu_temp = round(sensor.Value, 1)
                     found = True
-                    break
-            if not found:
-                w_std = wmi.WMI(namespace=r"root\wmi")
-                temps = w_std.MSAcpi_ThermalZoneTemperature()
-                if temps:
-                    temp_cpu_cache = round((temps[0].CurrentTemperature / 10.0) - 273.15, 1)
+                    break 
+            if not found: cache_cpu_temp = "n/a"
         except:
-            temp_cpu_cache = "n/a"
+            cache_cpu_temp = "n/a"
+        time.sleep(2)
+
+
+def broadcast_presence():
+    server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    while True:
+        try: server.sendto(b"PI_HELPER_SERVER_HERE", ('<broadcast>', 5006))
+        except: pass
         time.sleep(5)
 
-threading.Thread(target=wmi_monitor_thread, daemon=True).start()
-
-cpu_cache = 0.0
-def cpu_monitor():
-    global cpu_cache
-    while True:
-        cpu_cache = psutil.cpu_percent(interval=1)
-threading.Thread(target=cpu_monitor, daemon=True).start()
-
 # ================== ROUTES API ==================
+@app.route("/metrics")
+def metrics():
+    temp_gpu = "n/a"
+    if gpu_ok:
+        try:
+            import pynvml
+            temp_gpu = pynvml.nvmlDeviceGetTemperature(nvml_handle, pynvml.NVML_TEMPERATURE_GPU)
+        except: pass
+        
+    return jsonify({
+        "cpu": cache_cpu_load, 
+        "temp_cpu": cache_cpu_temp,
+        "gpu": cache_gpu_load, 
+        "temp_gpu": temp_gpu
+    })
+
 @app.route("/media", methods=["POST"])
 def media():
-    data = request.get_json(force=True) or {}
-    cmd = data.get("cmd", "").lower()
-    
-    # --- Commandes via simulation Clavier (Compatible VoiceMeeter) ---
-    if cmd == "playpause":
-        keyboard.send("play/pause media")
-    elif cmd == "next":
-        keyboard.send("next track")
-    elif cmd == "prev":
-        keyboard.send("previous track")
-        
-    # Volume & Mute
-    elif cmd == "vol_up":
-        keyboard.send("volume up")
-    elif cmd == "vol_down":
-        keyboard.send("volume down")
-    elif cmd == "mute_toggle":
-        keyboard.send("volume mute")
-        
-    return jsonify({"ok": True})
+    try:
+        data = request.get_json(force=True) or {}
+        cmd = data.get("cmd", "").lower()
+        if cmd == "playpause": keyboard.send("play/pause media")
+        elif cmd == "next": keyboard.send("next track")
+        elif cmd == "prev": keyboard.send("previous track")
+        elif cmd == "vol_up": keyboard.send("volume up")
+        elif cmd == "vol_down": keyboard.send("volume down")
+        elif cmd == "mute_toggle": keyboard.send("volume mute")
+        return jsonify({"ok": True})
+    except: return jsonify({"ok": False})
 
-# --- LANCER LES APPS ---
 @app.route("/launch", methods=["POST"])
 def launch():
     try:
         data = request.get_json(force=True) or {}
         app_name = data.get("name", "")
-        
         if app_name in APPS:
-            path = APPS[app_name]
-            print(f"[SYSTEM] Lancement de : {app_name}")
-            subprocess.Popen(path, shell=True)
-            return jsonify({"ok": True, "msg": f"Lancement de {app_name}"})
-        else:
-            return jsonify({"ok": False, "msg": "App inconnue"})
-    except Exception as e:
-        print(f"[ERROR] Launch: {e}")
-        return jsonify({"ok": False, "msg": str(e)})
+            subprocess.Popen(APPS[app_name], shell=True)
+            return jsonify({"ok": True, "msg": f"Lancement {app_name}"})
+        return jsonify({"ok": False, "msg": "Inconnu"})
+    except Exception as e: return jsonify({"ok": False, "msg": str(e)})
 
-@app.route("/metrics")
-def metrics():
-    temp_gpu = "n/a"
-    load_gpu = 0
-    if gpu_ok:
-        try:
-            temp_gpu = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
-            import subprocess, re
-            out = subprocess.check_output(
-                ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
-                text=True, timeout=0.5
-            )
-            load_gpu = float(re.findall(r"\d+", out)[0])
-        except: pass
-
-    return jsonify({
-        "cpu": round(cpu_cache, 1),
-        "temp_cpu": temp_cpu_cache,
-        "gpu": load_gpu,
-        "temp_gpu": temp_gpu
-    })
-
-# ================== ROUTE LISTE APPS ==================
 @app.route("/apps_list")
 def apps_list():
     return jsonify(list(APPS.keys()))
 
+# ================== MAIN ==================
 if __name__ == "__main__":
-    psutil.cpu_percent(interval=None) # Init CPU
-    print("Ecoute sur le port 5005...")
-    app.run(host="0.0.0.0", port=5005, debug=False)
+    import multiprocessing
+    multiprocessing.freeze_support()
+
+    print("--- SERVEUR MONITORING STABILISÉ ---")
+    
+    init_gpu()
+    
+    # Démarrage des lisseurs
+    threading.Thread(target=broadcast_presence, daemon=True).start()
+    threading.Thread(target=temp_thread, daemon=True).start()
+    threading.Thread(target=performance_thread, daemon=True).start()
+
+    try:
+        app.run(host="0.0.0.0", port=5005, threaded=True, debug=False)
+    except Exception as e:
+        print(f"Erreur: {e}")
+        input("Entrée pour quitter...")

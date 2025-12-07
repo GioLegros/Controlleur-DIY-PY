@@ -593,9 +593,9 @@ def render_launcher_ui(s):
             
             render_text_centered(s, lbl, font, col, y_pos)
 
-    if status:
-        pygame.draw.rect(s, (20,20,20), (0, H-100, W, 100))
-        render_text_centered(s, status, FONT_M, (0,255,0), H-50)
+    #if status:
+    #    pygame.draw.rect(s, (20,20,20), (0, H-100, W, 100))
+    #    render_text_centered(s, status, FONT_M, (0,255,0), H-50)
     
     hint = FONT_S.render("[PLAY] Lancer App", True, (150,150,150))
     s.blit(hint, (W//2 - hint.get_width()//2, 750))
