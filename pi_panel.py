@@ -274,7 +274,7 @@ def fetch_art(url):
     except: pass
 
 # ================== LOGIQUE THREADS ==================
-def logic_loop():
+def loop_spotify():
     last_t = 0
     last_m = 0
     last_mix = 0
@@ -282,7 +282,7 @@ def logic_loop():
     while True:
         now = time.time()
         
-        # --- 1. SPOTIFY POLL (Toutes les 1s) ---
+        # --- 1. SPOTIFY (1s) ---
         if now - last_t > SPOTIFY_POLL_S:
             try:
                 pb = sp.current_playback()
@@ -303,7 +303,7 @@ def logic_loop():
             except: pass
             last_t = now
             
-        # --- 2. METRICS POLL (Toutes les 2s) ---
+        # --- 2. METRICS (2s) ---
         if now - last_m > METRICS_POLL_S:
             try:
                 r = requests.get(f"{PC_HELPER_BASE}/metrics", timeout=0.5)
@@ -316,7 +316,7 @@ def logic_loop():
             except: pass
             last_m = now
 
-        # --- 3. MIXER POLL (Toutes les 2s - SANS FREEZE) ---
+        # --- 3. MIXER (2s) ---
         if now - last_mix > 2.0:
             should_poll = False
             with state_lock:
@@ -324,9 +324,8 @@ def logic_loop():
             
             if should_poll:
                 try:
-                    r = requests.get(f"{PC_HELPER_BASE}/mixer/list", timeout=1.5)
+                    r = requests.get(f"{PC_HELPER_BASE}/mixer/list", timeout=1.0)
                     sessions = r.json()
-                    
                     with state_lock:
                         old_idx = state["mixer_idx"]
                         state["mixer_sessions"] = sessions
@@ -335,6 +334,7 @@ def logic_loop():
                 except: pass
             last_mix = now
         
+        # Fluidité
         with state_lock:
             if state["playing"]:
                 state["progress"] = min(state["progress"] + 200, state["duration"])
@@ -346,7 +346,7 @@ def loop_gpio():
     global last_interaction
     if DEBUG: return 
     
-    import RPi.GPIO as GPIO # pyright: ignore[reportMissingModuleSource]
+    import RPi.GPIO as GPIO
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
     for p in BTN_PINS: GPIO.setup(p, GPIO.IN, pull_up_down=GPIO.PUD_UP)
@@ -359,10 +359,9 @@ def loop_gpio():
     last_clk = GPIO.input(ENC_A)
     
     while True:
-        now = time.time()
         any_activity = False
-
-        # --- ENCODEUR (Rotation) ---
+        
+        # --- ENCODEUR ---
         clk = GPIO.input(ENC_A)
         if clk != last_clk:
             any_activity = True
@@ -375,29 +374,21 @@ def loop_gpio():
                 with state_lock:
                     idx = state["menu_idx"] + direction
                     state["menu_idx"] = max(0, min(idx, len(state["menu_items"])-1))
-            elif curr_mode == "MIXER":
-                with state_lock:
-                    if state["mixer_sessions"]:
-                        app = state["mixer_sessions"][state["mixer_idx"]]
-                        change = 5 if direction > 0 else -5
-                        app["vol"] = max(0, min(100, app["vol"] + change))
-                        def t_vol():
-                            requests.post(f"{PC_HELPER_BASE}/mixer/set", json={"name": app["name"], "change": change})
-                        threading.Thread(target=t_vol).start()
             elif curr_mode == "LAUNCHER":
                 with state_lock:
                     idx = state["launcher_idx"] + direction
                     state["launcher_idx"] = max(0, min(idx, len(state["launcher_apps"])-1))
-            elif curr_mode == "STATS":
-                pass 
-            else: # Spotify
+            elif curr_mode == "SPOTIFY":
                 if direction > 0: pc_cmd("vol_up")
                 else: pc_cmd("vol_down")
             
+            # (Note : J'ai retiré le contrôle Mixer par molette ici pour privilégier les boutons ci-dessous, 
+            # mais tu pourras le remettre quand ta molette sera réparée)
+
             last_clk = clk
             time.sleep(0.002)
 
-        # --- CLIC ENCODEUR ---
+        # --- CLIC MOLETTE ---
         sw = GPIO.input(ENC_SW)
         if sw == 0 and last_sw == 1:
             any_activity = True
@@ -423,16 +414,19 @@ def loop_gpio():
             time.sleep(0.3)
         last_sw = sw
         
-        # --- BOUTONS ---
+        # --- BOUTONS CLASSIQUES ---
         for pin, name in BTN_PINS.items():
             val = GPIO.input(pin)
             if val == 0 and last_btn[pin] == 1:
                 any_activity = True
+                
+                # Variables d'action (pour exécuter hors du lock)
                 cmd_pc = None
                 action_menu = None
                 launch_btn_app = None
                 change_mode = False
                 toggle_stats = False
+                mixer_action = None # (change, app_name)
                 
                 with state_lock: 
                     curr_mode = state["mode"]
@@ -446,11 +440,22 @@ def loop_gpio():
                         elif name == "B2_PLAY": action_menu = state["menu_items"][state["menu_idx"]]["act"]
                     
                     elif curr_mode == "MIXER":
-                        with state_lock:
-                            if name == "B1_PREV":
-                                state["mixer_idx"] = max(0, state["mixer_idx"] - 1)
+                        sessions = state.get("mixer_sessions", [])
+                        if sessions:
+                            idx = state["mixer_idx"]
+                            # B2 (PLAY) -> Changer d'App
+                            if name == "B2_PLAY":
+                                state["mixer_idx"] = (idx + 1) % len(sessions)
+                            # B1 (PREV) -> Volume -
+                            elif name == "B1_PREV":
+                                app = sessions[idx]
+                                app["vol"] = max(0, app["vol"] - 10)
+                                mixer_action = (-10, app["name"])
+                            # B3 (NEXT) -> Volume +
                             elif name == "B3_NEXT":
-                                state["mixer_idx"] = min(len(state["mixer_sessions"])-1, state["mixer_idx"] + 1)
+                                app = sessions[idx]
+                                app["vol"] = min(100, app["vol"] + 10)
+                                mixer_action = (10, app["name"])
 
                     elif curr_mode == "STATS":
                         if name == "B2_PLAY": toggle_stats = True
@@ -465,22 +470,27 @@ def loop_gpio():
                         elif name == "B2_PLAY": cmd_pc = "playpause"
                         elif name == "B3_NEXT": cmd_pc = "next"
 
+                # --- EXÉCUTION DES ACTIONS (Hors Lock) ---
                 if change_mode:
                     with state_lock:
-                        # Cycle: SPOTIFY -> STATS -> MIXER -> LAUNCHER -> MENU
                         if state["mode"] == "SPOTIFY": state["mode"] = "STATS"
                         elif state["mode"] == "STATS": state["mode"] = "MIXER"
                         elif state["mode"] == "MIXER": state["mode"] = "LAUNCHER"
                         elif state["mode"] == "LAUNCHER": state["mode"] = "MENU"
                         else: state["mode"] = "SPOTIFY"
-                        
-                        if state["mode"] == "LAUNCHER":
-                            threading.Thread(target=refresh_apps_list).start()
+                        if state["mode"] == "LAUNCHER": threading.Thread(target=refresh_apps_list).start()
                         state["menu_msg"] = "" 
                 
                 if toggle_stats:
                     with state_lock:
                         state["stats_view"] = "GRAPHS" if state["stats_view"] == "GAUGES" else "GAUGES"
+
+                if mixer_action:
+                    change, appname = mixer_action
+                    def t_mix():
+                        try: requests.post(f"{PC_HELPER_BASE}/mixer/set", json={"name": appname, "change": change}, timeout=0.2)
+                        except: pass
+                    threading.Thread(target=t_mix).start()
 
                 if action_menu: menu_action(action_menu)
                 if cmd_pc: pc_cmd(cmd_pc)
@@ -490,17 +500,15 @@ def loop_gpio():
                         with state_lock: state["launcher_status"] = msg
                     threading.Thread(target=t_launch_btn).start()
 
+            if any_activity:
+                last_interaction = time.time()
+                with state_lock: sleeping = state["is_sleeping"]
+                if sleeping:
+                    set_screen_power(True)
+                    time.sleep(0.5) 
+                    continue
+
             last_btn[pin] = val
-
-        # --- GESTION DU REVEIL ---
-        if any_activity:
-            last_interaction = time.time()
-            with state_lock: sleeping = state["is_sleeping"]
-            if sleeping:
-                set_screen_power(True)
-                time.sleep(0.5)
-                continue
-
         time.sleep(0.005)
 
 # ================== RENDU GRAPHIQUE ==================
@@ -662,16 +670,11 @@ def render_launcher_ui(s):
             font = FONT_L if is_sel else FONT_M
             
             if is_sel:
-                # Cadre sélection
                 r = pygame.Rect(40, y_pos - 25, W-80, 60)
                 pygame.draw.rect(s, (255, 0, 150), r, border_radius=10)
                 pygame.draw.rect(s, (50, 0, 50), r.inflate(-4,-4), border_radius=10)
             
             render_text_centered(s, lbl, font, col, y_pos)
-
-    #if status:
-    #    pygame.draw.rect(s, (20,20,20), (0, H-100, W, 100))
-    #    render_text_centered(s, status, FONT_M, (0,255,0), H-50)
     
     hint = FONT_S.render("[PLAY] Lancer App", True, (150,150,150))
     s.blit(hint, (W//2 - hint.get_width()//2, 750))
@@ -760,7 +763,7 @@ def render_mixer_ui(s):
 
 # ================== MAIN LOOP ==================
 if __name__ == "__main__":
-    threading.Thread(target=logic_loop, daemon=True).start()
+    threading.Thread(target=loop_spotify, daemon=True).start()
     threading.Thread(target=loop_gpio, daemon=True).start()
     
     threading.Thread(target=refresh_apps_list).start()
