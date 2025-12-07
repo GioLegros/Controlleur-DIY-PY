@@ -41,7 +41,7 @@ ENC_A, ENC_B, ENC_SW = 6, 13, 19
 
 # UI CONSTANTS
 W, H = 480, 800
-FPS = 15
+FPS = 10
 ICONS_PATH = str(Path(__file__).resolve().parent / "icons")
 ROTATE_SCREEN = True
 
