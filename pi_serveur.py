@@ -2,6 +2,13 @@ from flask import Flask, jsonify, request
 import threading, time, psutil, platform, keyboard, subprocess, os
 import socket
 
+try: 
+    from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
+    import pythoncom
+    AUDIO_OK = True
+except:
+    AUDIO_OK = True
+
 # ================== CONFIGURATION DES APPS ==================
 # Astuce: Pour jeux Steam, "steam://rungameid/ID_DU_JEU"
 APPS = {
@@ -17,8 +24,6 @@ APPS = {
 # ================== GLOBALES & INIT ==================
 gpu_ok = False
 nvml_handle = None
-
-# Variables "Cache" pour stocker les valeurs lissées
 cache_cpu_load = 0.0
 cache_gpu_load = 0
 cache_cpu_temp = "n/a"
@@ -129,6 +134,40 @@ def launch():
         return jsonify({"ok": False, "msg": "Inconnu"})
     except Exception as e: return jsonify({"ok": False, "msg": str(e)})
 
+@app.route("/mixer/list")
+def mixer_list():
+    if not AUDIO_OK: return jsonify([])
+    sessions_list = []
+    try:
+        pythoncom.CoInitialize()
+        sessions = AudioUtilities.GetAllSessions()
+        for session in sessions:
+            if session.Process:
+                name = session.Process.name().replace(".exe", "")
+                vol = session.SimpleAudioVolume.GetMasterVolume()
+                sessions_list.append({"name": name, "vol": int(vol * 100)})
+    except: pass
+    return jsonify(sessions_list)
+
+@app.route("/mixer/set", methods=["POST"])
+def mixer_set():
+    if not AUDIO_OK: return jsonify({"ok": False})
+    try:
+        data = request.get_json(force=True)
+        target_name = data.get("name")
+        change = data.get("change", 0)
+        
+        pythoncom.CoInitialize()
+        sessions = AudioUtilities.GetAllSessions()
+        for session in sessions:
+            if session.Process and session.Process.name().replace(".exe", "") == target_name:
+                vol = session.SimpleAudioVolume.GetMasterVolume()
+                new_vol = max(0.0, min(1.0, vol + (change / 100.0)))
+                session.SimpleAudioVolume.SetMasterVolume(new_vol, None)
+                return jsonify({"ok": True, "new_vol": int(new_vol*100)})
+    except: pass
+    return jsonify({"ok": False})
+
 @app.route("/apps_list")
 def apps_list():
     return jsonify(list(APPS.keys()))
@@ -136,13 +175,9 @@ def apps_list():
 # ================== MAIN ==================
 if __name__ == "__main__":
     import multiprocessing
-    multiprocessing.freeze_support()
-
-    print("--- SERVEUR MONITORING STABILISÉ ---")
-    
+    multiprocessing.freeze_support()  
     init_gpu()
-    
-    # Démarrage des lisseurs
+    # Démarrage des lisseurs usage CPU/GPU et Température
     threading.Thread(target=broadcast_presence, daemon=True).start()
     threading.Thread(target=temp_thread, daemon=True).start()
     threading.Thread(target=performance_thread, daemon=True).start()
@@ -151,4 +186,3 @@ if __name__ == "__main__":
         app.run(host="0.0.0.0", port=5005, threaded=True, debug=False)
     except Exception as e:
         print(f"Erreur: {e}")
-        input("Entrée pour quitter...")

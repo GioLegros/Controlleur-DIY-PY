@@ -138,10 +138,14 @@ state = {
     "launcher_idx": 0,
     "launcher_status": "",
 
+    # Mixer
+    "mixer_sessions": [],
+    "mixer_idx": 0,
+
     # Menu
     "menu_idx": 0,
     "menu_msg": "",
-    "sleep_enabled": True,
+    "sleep_enabled": False,
     "is_sleeping": False,
     "menu_items": [
         {"lbl": "Retour Spotify", "act": "BACK"},
@@ -325,8 +329,9 @@ def loop_spotify():
 # ================== GPIO INPUT ==================
 def loop_gpio():
     global last_interaction
-    if DEBUG: return
-    import RPi.GPIO as GPIO
+    if DEBUG: return # En mode DEBUG, on sort immédiatement car pas de GPIO
+    
+    import RPi.GPIO as GPIO # pyright: ignore[reportMissingModuleSource] because windows env
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
     for p in BTN_PINS: GPIO.setup(p, GPIO.IN, pull_up_down=GPIO.PUD_UP)
@@ -337,11 +342,28 @@ def loop_gpio():
     last_btn = {p:1 for p in BTN_PINS}
     last_sw = 1
     last_clk = GPIO.input(ENC_A)
+    last_mix = 0
     
     while True:
-        # --- GESTION DU REVEIL ---
+        now = time.time()
         any_activity = False
-        # --- ENCODEUR ---
+
+        # --- POLL MIXER (Toutes les 2 sec) ---
+        if now - last_mix > 2.0:
+            with state_lock: m = state["mode"]
+            if m == "MIXER":
+                try:
+                    r = requests.get(f"{PC_HELPER_BASE}/mixer/list", timeout=1.0)
+                    sessions = r.json()
+                    with state_lock:
+                        old_idx = state["mixer_idx"]
+                        state["mixer_sessions"] = sessions
+                        if sessions:
+                            state["mixer_idx"] = min(old_idx, len(sessions)-1)
+                except: pass
+            last_mix = now
+
+        # --- ENCODEUR (Rotation) ---
         clk = GPIO.input(ENC_A)
         if clk != last_clk:
             any_activity = True
@@ -354,13 +376,22 @@ def loop_gpio():
                 with state_lock:
                     idx = state["menu_idx"] + direction
                     state["menu_idx"] = max(0, min(idx, len(state["menu_items"])-1))
+            elif curr_mode == "MIXER":
+                with state_lock:
+                    if state["mixer_sessions"]:
+                        app = state["mixer_sessions"][state["mixer_idx"]]
+                        change = 5 if direction > 0 else -5
+                        app["vol"] = max(0, min(100, app["vol"] + change))
+                        def t_vol():
+                            requests.post(f"{PC_HELPER_BASE}/mixer/set", json={"name": app["name"], "change": change})
+                        threading.Thread(target=t_vol).start()
             elif curr_mode == "LAUNCHER":
                 with state_lock:
                     idx = state["launcher_idx"] + direction
                     state["launcher_idx"] = max(0, min(idx, len(state["launcher_apps"])-1))
             elif curr_mode == "STATS":
                 pass 
-            else:
+            else: # Spotify
                 if direction > 0: pc_cmd("vol_up")
                 else: pc_cmd("vol_down")
             
@@ -383,7 +414,6 @@ def loop_gpio():
 
             if action_to_do: menu_action(action_to_do)
             elif launch_app:
-                # Thread pour ne pas bloquer
                 def t_launch():
                     msg = launch_app_cmd(launch_app)
                     with state_lock: state["launcher_status"] = msg
@@ -416,6 +446,13 @@ def loop_gpio():
                         elif name == "B3_NEXT": state["menu_idx"] = min(len(state["menu_items"])-1, state["menu_idx"] + 1)
                         elif name == "B2_PLAY": action_menu = state["menu_items"][state["menu_idx"]]["act"]
                     
+                    elif curr_mode == "MIXER":
+                        with state_lock:
+                            if name == "B1_PREV":
+                                state["mixer_idx"] = max(0, state["mixer_idx"] - 1)
+                            elif name == "B3_NEXT":
+                                state["mixer_idx"] = min(len(state["mixer_sessions"])-1, state["mixer_idx"] + 1)
+
                     elif curr_mode == "STATS":
                         if name == "B2_PLAY": toggle_stats = True
                     
@@ -431,21 +468,19 @@ def loop_gpio():
 
                 if change_mode:
                     with state_lock:
-                        # Cycle: SPOTIFY -> STATS -> LAUNCHER -> MENU
                         if state["mode"] == "SPOTIFY": state["mode"] = "STATS"
-                        elif state["mode"] == "STATS": state["mode"] = "LAUNCHER"
+                        elif state["mode"] == "STATS": state["mode"] = "MIXER"
+                        elif state["mode"] == "MIXER": state["mode"] = "LAUNCHER"
                         elif state["mode"] == "LAUNCHER": state["mode"] = "MENU"
                         else: state["mode"] = "SPOTIFY"
                         
-                        # Si on arrive sur Launcher, on refresh
                         if state["mode"] == "LAUNCHER":
                             threading.Thread(target=refresh_apps_list).start()
                         state["menu_msg"] = "" 
                 
                 if toggle_stats:
                     with state_lock:
-                        if state["stats_view"] == "GAUGES": state["stats_view"] = "GRAPHS"
-                        else: state["stats_view"] = "GAUGES"
+                        state["stats_view"] = "GRAPHS" if state["stats_view"] == "GAUGES" else "GAUGES"
 
                 if action_menu: menu_action(action_menu)
                 if cmd_pc: pc_cmd(cmd_pc)
@@ -455,16 +490,17 @@ def loop_gpio():
                         with state_lock: state["launcher_status"] = msg
                     threading.Thread(target=t_launch_btn).start()
 
-            # --- SI ACTIVITÉ DÉTECTÉE ---
-            if any_activity:
-                last_interaction = time.time()
-                with state_lock: sleeping = state["is_sleeping"]
-                if sleeping:
-                    set_screen_power(True)
-                    time.sleep(0.5) 
-                    continue
-
             last_btn[pin] = val
+
+        # --- GESTION DU REVEIL ---
+        if any_activity:
+            last_interaction = time.time()
+            with state_lock: sleeping = state["is_sleeping"]
+            if sleeping:
+                set_screen_power(True)
+                time.sleep(0.5)
+                continue
+
         time.sleep(0.005)
 
 # ================== RENDU GRAPHIQUE ==================
@@ -676,6 +712,51 @@ def render_menu_ui(s):
     inst = FONT_S.render("[PREV/NEXT] Naviguer  -  [PLAY] Valider", True, (100,100,100))
     s.blit(inst, (W//2 - inst.get_width()//2, 760))
 
+def render_mixer_ui(s):
+    s.fill((20, 25, 30))
+    render_text_centered(s, "AUDIO MIXER", FONT_XL, (50, 150, 255), 60)
+    pygame.draw.line(s, (50,150,255), (40, 90), (W-40, 90), 3)
+        
+    with state_lock:
+        sessions = state["mixer_sessions"]
+        idx = state["mixer_idx"]
+        
+    if not sessions:
+        render_text_centered(s, "Aucune application audio", FONT_M, (150,150,150), H//2)
+        return
+
+    start_y = 150
+    for i in range(idx-2, idx+3):
+        if 0 <= i < len(sessions):
+            item = sessions[i]
+            is_sel = (i == idx)
+                
+            y_pos = start_y + (i - (idx-2)) * 100
+            col = (255, 255, 255) if is_sel else (100, 100, 100)
+                
+            if is_sel:
+                pygame.draw.rect(s, (40, 40, 50), (30, y_pos-10, W-60, 90), border_radius=10)
+                pygame.draw.rect(s, (50, 150, 255), (30, y_pos-10, W-60, 90), 2, border_radius=10)
+
+            nm = FONT_L.render(item["name"], True, col)
+            s.blit(nm, (50, y_pos))
+
+            vol = item["vol"]
+            bar_w = 200
+            pygame.draw.rect(s, (50,50,50), (W-250, y_pos+15, bar_w, 15), border_radius=5)
+            c_bar = (50, 255, 50)
+            if vol > 80: c_bar = (255, 50, 50)
+            elif vol > 60: c_bar = (255, 200, 0)
+            
+            pygame.draw.rect(s, c_bar, (W-250, y_pos+15, int(bar_w * (vol/100)), 15), border_radius=5)
+            
+            s.blit(v_txt, (W-250 + bar_w/2 - v_txt.get_width()/2, y_pos+40))
+            v_txt = FONT_M.render(f"{vol}%", True, col)
+
+    s.blit(hint, (W//2 - hint.get_width()//2, 750))
+    hint = FONT_S.render("[Molette] Volume  -  [Gauche/Droite] Choisir", True, (150,150,150))
+         
+
 # ================== MAIN LOOP ==================
 if __name__ == "__main__":
     threading.Thread(target=loop_spotify, daemon=True).start()
@@ -711,6 +792,7 @@ if __name__ == "__main__":
             frame.fill((0,0,0))
             if m == "SPOTIFY": render_spotify_ui(frame)
             elif m == "STATS": render_stats_ui(frame)
+            elif m == "MIXER": render_mixer_ui(frame)
             elif m == "LAUNCHER": render_launcher_ui(frame)
             elif m == "MENU": render_menu_ui(frame)
             
