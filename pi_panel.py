@@ -227,36 +227,18 @@ def menu_action(act):
             subprocess.run(["sudo", "shutdown", "now"])
         elif act == "UPDATE":
             state["menu_msg"] = "Mise à jour Git..."
-            def run_git_pull():
+            def t_update():
                 try:
-                    repo_path = Path(__file__).parent
-                    
-                    # Exécute git pull
-                    result = subprocess.check_output(
-                        ["git", "pull", "origin", "master"], 
-                        cwd=repo_path, 
-                        stderr=subprocess.STDOUT, 
-                        text=True
-                    )
-                    
-                    with state_lock:
-                        lines = result.strip().split('\n')[-3:]
-                        state["menu_msg"] = "Git: " + "\n".join(lines)
-                        
-                    if "Already up to date" not in result:
-                        time.sleep(3)
-                        with state_lock: state["menu_msg"] = "Redémarrage..."
-                        time.sleep(1)
-                        subprocess.run(["sudo", "reboot"]) 
-
-                except subprocess.CalledProcessError as e:
-                    with state_lock:
-                        state["menu_msg"] = f"Erreur Git:\n{e.output}"
+                    path = Path(__file__).parent
+                    out = subprocess.check_output(["git", "pull", "origin", "main"], cwd=path, text=True)
+                    with state_lock: state["menu_msg"] = f"Git: {out.strip()[-20:]}"
+                    time.sleep(2)
+                    with state_lock: state["menu_msg"] = "Relancement..."
+                    time.sleep(1)
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
                 except Exception as e:
-                    with state_lock:
-                        state["menu_msg"] = f"Erreur:\n{str(e)}"
-
-            threading.Thread(target=run_git_pull).start()
+                    with state_lock: state["menu_msg"] = f"Err: {e}"
+            threading.Thread(target=t_update).start()
 
 def async_wifi_scan():
     nets = get_wifi_list()
